@@ -4,7 +4,7 @@
 
 Floating TODO is a high-performance Windows desktop companion designed for developers and power users who want an unobtrusive, always-accessible task list. Engineered in Rust using raw Win32 bindings and WinRT speech APIs (`windows-rs`), it runs without web runtimes, browser frameworks, or heavy abstraction layers.
 
-- **Executable Size:** ~390 KB standalone binary (fully self-contained, no external DLL dependencies).
+- **Executable Size:** ~231 KB standalone binary (fully self-contained, no external DLL dependencies).
 - **Memory Footprint:** Less than 12 MB RAM at runtime.
 - **Framework Overhead:** 0% — No Electron, no WebView2, no Chromium.
 
@@ -113,17 +113,35 @@ windows-todo-app/
 
 The project includes a hermetic Docker build environment using `cargo-xwin` and the Windows MSVC SDK. You do not need Rust or Visual Studio installed on your host machine.
 
-Run the PowerShell build script:
+#### Option 1: One-Click PowerShell Script
+Run the automated build script:
 
 ```powershell
 .\build.ps1
 ```
 
-**What `build.ps1` does:**
-1. Builds a Docker image containing the Rust toolchain, `cargo-xwin`, Clang/LLD, and Windows SDK headers.
-2. Compiles the binary with size optimization (`opt-level = "z"`, LTO, strip).
-3. Compiles the Windows PE version resource (`VERSIONINFO`) into the executable via `llvm-rc`.
-4. Extracts `floating-todo.exe` directly into the project root directory.
+#### Option 2: Direct Docker Commands
+You can run the underlying Docker commands directly from any shell (PowerShell, Command Prompt, or Bash):
+
+```bash
+# 1. Build the Docker image containing Rust, cargo-xwin, and MSVC SDK
+docker build -t floating-todo-builder .
+
+# 2. Create a temporary container to extract the artifact
+docker create --name ftodo-extract floating-todo-builder
+
+# 3. Copy the compiled release executable to the project directory
+docker cp ftodo-extract:/app/target/x86_64-pc-windows-msvc/release/floating-todo.exe .\floating-todo.exe
+
+# 4. Remove the temporary container
+docker rm -f ftodo-extract
+```
+
+**What the Docker build does under the hood:**
+1. Pulls the base Rust image, installs `cargo-xwin`, Clang, and LLD.
+2. Cross-compiles the binary targeting `x86_64-pc-windows-msvc` with aggressive size optimization (`opt-level = "z"`, LTO, strip, abort-on-panic).
+3. Executes `build.rs` to compile the Windows PE version resource (`VERSIONINFO`) into `version.res` via `llvm-rc` and links it into the executable.
+4. Produces the standalone `floating-todo.exe` ready for deployment without host toolchain dependencies.
 
 ### Method B: Native Windows Build (Cargo)
 
@@ -240,7 +258,7 @@ Run the executable with the version flag from PowerShell or Command Prompt:
 
 Output:
 ```text
-Floating TODO v0.1.0
+Floating TODO v0.2.0
 Architecture: x86_64-pc-windows-msvc
 Edition: 2021
 Config: %APPDATA%\FloatingTodo\tasks.json
@@ -257,8 +275,8 @@ Query the embedded Windows PE header:
 
 Output:
 ```text
-FileVersion     : 0.1.0.0
-ProductVersion  : 0.1.0
+FileVersion     : 0.2.0.0
+ProductVersion  : 0.2.0
 FileDescription : Ultra-lightweight floating TODO window for Windows
 ```
 
@@ -268,7 +286,7 @@ FileDescription : Ultra-lightweight floating TODO window for Windows
 - Inspect **File version**, **Product name**, and **Product version**.
 
 #### 4. In-App System Tray
-- **Hover:** Hover your mouse over the system tray icon to view the tooltip: `Floating TODO v0.1.0`.
+- **Hover:** Hover your mouse over the system tray icon to view the tooltip: `Floating TODO v0.2.0`.
 - **Right-Click:** The top header of the context menu explicitly displays the active version.
 
 ---
@@ -282,18 +300,26 @@ To publish a new version of Floating TODO:
    ```toml
    [package]
    name = "floating-todo"
-   version = "0.1.1" # Bump version here
+   version = "0.2.0" # Bump version here
    ```
 2. **Rebuild the Executable:**
+   Using PowerShell:
    ```powershell
    .\build.ps1
+   ```
+   Or using direct Docker commands:
+   ```bash
+   docker build -t floating-todo-builder .
+   docker create --name ftodo-extract floating-todo-builder
+   docker cp ftodo-extract:/app/target/x86_64-pc-windows-msvc/release/floating-todo.exe .\floating-todo.exe
+   docker rm -f ftodo-extract
    ```
    `build.rs` automatically updates the embedded `VERSIONINFO` PE header and recompiles the binary with the new version stamp.
 3. **Create a Git Tag:**
    ```powershell
    git add Cargo.toml
-   git commit -m "Release v0.1.1"
-   git tag -a v0.1.1 -m "Release v0.1.1"
+   git commit -m "Release v0.2.0"
+   git tag -a v0.2.0 -m "Release v0.2.0"
    ```
 4. **Publish:**
    Distribute `floating-todo.exe` via GitHub Releases or your deployment pipeline.
