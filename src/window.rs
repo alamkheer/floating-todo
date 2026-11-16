@@ -185,6 +185,50 @@ unsafe extern "system" fn wnd_proc(
 
             SelectObject(hdc, old_font);
 
+            // ── Very bottom placeholder text denoting version ──
+            let footer_y = WIN_HEIGHT - ui::FOOTER_HEIGHT;
+            let footer_rc = RECT {
+                left: 0,
+                top: footer_y,
+                right: WIN_WIDTH,
+                bottom: WIN_HEIGHT,
+            };
+            let footer_brush = CreateSolidBrush(COLORREF(ui::CLR_HEADER_DARK));
+            FillRect(hdc, &footer_rc, footer_brush);
+            let _ = DeleteObject(footer_brush.into());
+
+            // 1px top border for subtle separation
+            let sep_rc = RECT {
+                left: 0,
+                top: footer_y,
+                right: WIN_WIDTH,
+                bottom: footer_y + 1,
+            };
+            let sep_brush = CreateSolidBrush(COLORREF(0x00333333));
+            FillRect(hdc, &sep_rc, sep_brush);
+            let _ = DeleteObject(sep_brush.into());
+
+            // Version text (small, dimmed placeholder text at very bottom)
+            let ver_font = ui::Font::new(11, false);
+            let old_ver_font = SelectObject(hdc, ver_font.handle().into());
+            SetTextColor(hdc, COLORREF(ui::CLR_TEXT_DIM));
+
+            let ver_text = format!("Floating TODO v{}", env!("CARGO_PKG_VERSION"));
+            let mut ver_u16: Vec<u16> = ver_text.encode_utf16().collect();
+            let mut text_rc = RECT {
+                left: 10,
+                top: footer_y,
+                right: WIN_WIDTH - 10,
+                bottom: WIN_HEIGHT,
+            };
+            DrawTextW(
+                hdc,
+                &mut ver_u16,
+                &mut text_rc,
+                DT_SINGLELINE | DT_CENTER | DT_VCENTER,
+            );
+            SelectObject(hdc, old_ver_font);
+
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }
@@ -258,20 +302,26 @@ unsafe extern "system" fn wnd_proc(
         ui::WM_ADD_TASK => {
             if let Some(state) = get_state(hwnd) {
                 let text = ui::get_input_text(state.hwnd_input);
-                if !text.is_empty() {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
                     if state.sub_task_input_mode {
                         if let Some(parent_id) = state.selected_task_id {
-                            state.add_sub_task(parent_id, text);
+                            state.add_sub_task(parent_id, trimmed.to_string());
                         }
                         state.sub_task_input_mode = false;
+                        ui::set_cue_banner(state.hwnd_input, "Add a task... (Press Enter)");
                     } else {
-                        state.add_task(text);
+                        state.add_task(trimmed.to_string());
                     }
                     ui::clear_input(state.hwnd_input);
                     ui::refresh_task_list(state);
-                    schedule_save(hwnd);
+                    // Save to disk immediately upon Enter keystroke
+                    let _ = storage::save_tasks(&state.tasks, state.next_id);
+                    state.dirty = false;
                 } else if state.sub_task_input_mode {
                     state.sub_task_input_mode = false;
+                    ui::clear_input(state.hwnd_input);
+                    ui::set_cue_banner(state.hwnd_input, "Add a task... (Press Enter)");
                 }
             }
             LRESULT(0)
@@ -330,7 +380,8 @@ unsafe extern "system" fn wnd_proc(
                     if !text.is_empty() {
                         state.add_task(text);
                         ui::refresh_task_list(state);
-                        schedule_save(hwnd);
+                        let _ = storage::save_tasks(&state.tasks, state.next_id);
+                        state.dirty = false;
                     }
                     let _ = InvalidateRect(Some(state.hwnd_voice_btn), None, true);
                 }
@@ -348,12 +399,33 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
+        // ── Custom message: Speech privacy policy or mic permission required ──
+        voice::WM_VOICE_PERMISSION_REQUIRED => {
+            if let Some(state) = get_state(hwnd) {
+                state.is_recording_voice = false;
+                let _ = KillTimer(Some(hwnd), VOICE_COUNTDOWN_TIMER_ID);
+                let _ = InvalidateRect(Some(state.hwnd_voice_btn), None, true);
+                voice::prompt_speech_permission(hwnd);
+            }
+            LRESULT(0)
+        }
+
         // ── Button clicks and list selection ──
         WM_COMMAND => {
             let ctrl_id = (wparam.0 & 0xFFFF) as i32;
             let notify_code = ((wparam.0 >> 16) & 0xFFFF) as u16;
 
             match ctrl_id {
+                // ── Dialog Enter message (IDOK = 1) ──
+                1 => {
+                    let focus = GetFocus();
+                    if let Some(state) = get_state(hwnd) {
+                        if focus == state.hwnd_input {
+                            let _ = PostMessageW(Some(hwnd), ui::WM_ADD_TASK, WPARAM(0), LPARAM(0));
+                        }
+                    }
+                }
+
                 // ── Header buttons ──
                 ui::IDC_BTN_PIN => {
                     if let Some(state) = get_state(hwnd) {
@@ -408,6 +480,7 @@ unsafe extern "system" fn wnd_proc(
                                 if !task.completed {
                                     state.sub_task_input_mode = true;
                                     ui::set_input_text(state.hwnd_input, "");
+                                    ui::set_cue_banner(state.hwnd_input, "Add sub-task... (Press Enter)");
                                     let _ = InvalidateRect(Some(state.hwnd_add_sub_btn), None, true);
                                 }
                             }
@@ -622,6 +695,18 @@ pub fn run_message_loop(hwnd: HWND) {
     unsafe {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            // If Enter is pressed while focused on the EDIT control, dispatch directly
+            // so IsDialogMessageW doesn't suppress or eat it.
+            if msg.message == WM_KEYDOWN && msg.wParam.0 == VK_RETURN.0 as usize {
+                if let Some(state) = get_state(hwnd) {
+                    if GetFocus() == state.hwnd_input {
+                        let _ = TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                        continue;
+                    }
+                }
+            }
+
             // IsDialogMessageW translates Tab / Shift+Tab and Space/Enter navigation
             if !IsDialogMessageW(hwnd, &msg).as_bool() {
                 let _ = TranslateMessage(&msg);

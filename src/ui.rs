@@ -25,6 +25,7 @@ pub const HEADER_HEIGHT: i32 = 36;
 pub const INPUT_HEIGHT: i32 = 30;
 pub const FILTER_HEIGHT: i32 = 28;
 pub const ITEM_HEIGHT: i32 = 38;
+pub const FOOTER_HEIGHT: i32 = 22;
 pub const MARGIN: i32 = 8;
 pub const BTN_SIZE: i32 = 28;
 
@@ -178,7 +179,7 @@ pub fn create_controls(hwnd: HWND, state: &mut AppState, hinstance: HINSTANCE, w
 
         // ── 4. Owner-drawn task list (with WS_TABSTOP) ──
         let list_y = filter_y + FILTER_HEIGHT + MARGIN;
-        let list_h = 480 - list_y;
+        let list_h = 480 - list_y - FOOTER_HEIGHT;
 
         state.hwnd_list = CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -234,6 +235,9 @@ pub fn create_controls(hwnd: HWND, state: &mut AppState, hinstance: HINSTANCE, w
             1,
             0,
         );
+
+        // Placeholder cue banner text for EDIT input
+        set_cue_banner(state.hwnd_input, "Add a task... (Press Enter)");
 
         // ── 6. Info Popovers / Balloon Tooltips ──
         state.hwnd_tooltip = create_info_tooltips(hwnd, hinstance, state);
@@ -350,7 +354,7 @@ fn add_tooltip_tool(hwnd_tip: HWND, parent: HWND, target_hwnd: HWND, text: &str)
 /// Custom message: Enter pressed in input field.
 pub const WM_ADD_TASK: u32 = WM_APP + 100;
 
-/// Subclass proc for the EDIT control — captures Enter key and Escape key.
+/// Subclass proc for the EDIT control — captures Enter key and delegates Tab navigation.
 unsafe extern "system" fn edit_subclass_proc(
     hwnd: HWND,
     msg: u32,
@@ -359,15 +363,32 @@ unsafe extern "system" fn edit_subclass_proc(
     _uid: usize,
     _data: usize,
 ) -> LRESULT {
-    if msg == WM_KEYDOWN {
-        if wparam.0 == VK_RETURN.0 as usize {
-            if let Ok(parent) = GetParent(hwnd) {
-                let _ = PostMessageW(Some(parent), WM_ADD_TASK, WPARAM(0), LPARAM(0));
-                return LRESULT(0);
+    match msg {
+        WM_GETDLGCODE => {
+            let base = DefSubclassProc(hwnd, msg, wparam, lparam).0;
+            // Intercept Enter key so IsDialogMessage doesn't swallow it
+            if lparam.0 != 0 {
+                let pmsg = &*(lparam.0 as *const MSG);
+                if pmsg.message == WM_KEYDOWN && pmsg.wParam.0 == VK_RETURN.0 as usize {
+                    return LRESULT(base | (DLGC_WANTMESSAGE as isize));
+                }
             }
+            if wparam.0 == VK_RETURN.0 as usize {
+                return LRESULT(base | (DLGC_WANTMESSAGE as isize));
+            }
+            LRESULT(base)
         }
+        WM_KEYDOWN => {
+            if wparam.0 == VK_RETURN.0 as usize {
+                if let Ok(parent) = GetParent(hwnd) {
+                    let _ = PostMessageW(Some(parent), WM_ADD_TASK, WPARAM(0), LPARAM(0));
+                    return LRESULT(0);
+                }
+            }
+            DefSubclassProc(hwnd, msg, wparam, lparam)
+        }
+        _ => DefSubclassProc(hwnd, msg, wparam, lparam),
     }
-    DefSubclassProc(hwnd, msg, wparam, lparam)
 }
 
 /// Apply a font to a window/control via WM_SETFONT.
@@ -795,5 +816,18 @@ pub fn set_input_text(hwnd_input: HWND, text: &str) {
         let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
         let _ = SetWindowTextW(hwnd_input, PCWSTR(wide.as_ptr()));
         let _ = SetFocus(Some(hwnd_input));
+    }
+}
+
+/// Set placeholder cue banner text on an EDIT control (EM_SETCUEBANNER).
+pub fn set_cue_banner(hwnd_input: HWND, text: &str) {
+    unsafe {
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let _ = SendMessageW(
+            hwnd_input,
+            0x1501, // EM_SETCUEBANNER
+            Some(WPARAM(1)), // fDrawFocused = TRUE (show cue banner even when focused if empty)
+            Some(LPARAM(wide.as_ptr() as isize)),
+        );
     }
 }

@@ -55,6 +55,19 @@ fn main() -> windows::core::Result<()> {
     // 3. Create the main window (passes state ownership into GWLP_USERDATA)
     let hwnd = window::create_main_window(state)?;
 
+    // Trim process working set for minimal memory footprint
+    unsafe {
+        extern "system" {
+            fn SetProcessWorkingSetSize(
+                hProcess: *mut std::ffi::c_void,
+                dwMinimumWorkingSetSize: usize,
+                dwMaximumWorkingSetSize: usize,
+            ) -> i32;
+            fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        }
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+
     // 4. Register global hotkey (RAII — auto-unregisters on drop)
     let _hotkey = hotkey::GlobalHotkey::register(hwnd);
 

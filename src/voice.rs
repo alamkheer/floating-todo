@@ -1,7 +1,8 @@
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -17,27 +18,26 @@ use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 pub const WM_VOICE_RESULT: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 101;
 pub const WM_VOICE_STOPPED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 102;
+pub const WM_VOICE_PERMISSION_REQUIRED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 103;
 
 /// Global atomic cancellation handle for an in-flight voice recording session.
 static RECORDING_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Standard, memory-safe thread waker for evaluating async WinRT operations on background threads.
+struct ThreadWaker(thread::Thread);
+
+impl Wake for ThreadWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
+    }
+}
+
 /// Helper to synchronously evaluate a standard Rust future with timeout and cancellation checks.
 fn await_future<F: Future>(mut future: F, timeout: Duration) -> Option<F::Output> {
-    let thread = thread::current();
-
-    fn raw_waker(thread: &thread::Thread) -> RawWaker {
-        let ptr = thread as *const thread::Thread as *const ();
-        RawWaker::new(ptr, &VTABLE)
-    }
-
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(
-        |ptr| RawWaker::new(ptr, &VTABLE),
-        |ptr| unsafe { (*(ptr as *const thread::Thread)).unpark() },
-        |ptr| unsafe { (*(ptr as *const thread::Thread)).unpark() },
-        |_| {},
-    );
-
-    let waker = unsafe { Waker::from_raw(raw_waker(&thread)) };
+    let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
     let mut cx = Context::from_waker(&waker);
     let mut pin = unsafe { Pin::new_unchecked(&mut future) };
 
@@ -53,11 +53,30 @@ fn await_future<F: Future>(mut future: F, timeout: Duration) -> Option<F::Output
                 if elapsed >= timeout {
                     return None;
                 }
-                let tick = Duration::from_millis(500).min(timeout - elapsed);
+                let tick = Duration::from_millis(250).min(timeout - elapsed);
                 thread::park_timeout(tick);
             }
         }
     }
+}
+
+/// Checks if an error is due to missing Windows speech privacy policy or microphone permission.
+fn is_permission_error(err: &windows::core::Error) -> bool {
+    let code = err.code().0 as u32;
+    // 0x80045509: SPP_E_POLICY_NOT_ACCEPTED (speech privacy policy not accepted)
+    // 0x80070005: E_ACCESSDENIED (microphone permission denied)
+    if code == 0x80045509 || code == 0x80070005 {
+        return true;
+    }
+    let msg = err.message().to_lowercase();
+    msg.contains("privacy policy") || msg.contains("permission") || msg.contains("access")
+}
+
+/// Outcome of a voice recognition attempt.
+enum VoiceOutcome {
+    Success(String),
+    PermissionRequired,
+    Stopped,
 }
 
 /// Checks if a voice recording session is currently running.
@@ -71,10 +90,44 @@ pub fn cancel_recording() {
     RECORDING_ACTIVE.store(false, Ordering::SeqCst);
 }
 
+/// Prompt the user with a dialog to open Windows Settings and enable Speech & Microphone permissions.
+pub fn prompt_speech_permission(hwnd: HWND) {
+    unsafe {
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            MessageBoxW, IDYES, MB_ICONINFORMATION, MB_YESNO, SW_SHOWNORMAL,
+        };
+
+        let title = windows::core::w!("Microphone & Speech Permission Required");
+        let msg = windows::core::w!(
+            "Voice dictation requires Windows Online Speech Recognition and Microphone access.\n\n\
+            To enable speech dictation:\n\
+            1. Turn on \"Online speech recognition\" in Settings.\n\
+            2. Ensure Microphone access is allowed for apps.\n\n\
+            Would you like to open Windows Settings now?"
+        );
+
+        let res = MessageBoxW(Some(hwnd), msg, title, MB_YESNO | MB_ICONINFORMATION);
+        if res == IDYES {
+            let _ = ShellExecuteW(
+                Some(hwnd),
+                windows::core::w!("open"),
+                windows::core::w!("ms-settings:privacy-speech"),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            );
+        }
+    }
+}
+
 /// Spawns a background thread to record voice for up to 30 seconds using
 /// WinRT SpeechRecognizer with a Dictation topic constraint.
 ///
-/// On completion, posts WM_VOICE_RESULT with `*mut String` as WPARAM to the window.
+/// On completion:
+/// - Success: Posts WM_VOICE_RESULT with `*mut String` as WPARAM
+/// - Permission error: Posts WM_VOICE_PERMISSION_REQUIRED
+/// - Cancelled/Timeout: Posts WM_VOICE_STOPPED
 pub fn start_voice_recognition(hwnd: HWND) {
     if RECORDING_ACTIVE.swap(true, Ordering::SeqCst) {
         // Already recording; return early
@@ -84,58 +137,102 @@ pub fn start_voice_recognition(hwnd: HWND) {
     let hwnd_raw = hwnd.0 as usize;
 
     thread::spawn(move || {
-        let result_text = run_recognition_session();
+        let outcome = run_recognition_session();
 
         RECORDING_ACTIVE.store(false, Ordering::SeqCst);
 
         let target_hwnd = HWND(hwnd_raw as *mut _);
 
-        // Notify window on completion
-        if let Some(text) = result_text {
-            let text_box = Box::new(text);
-            unsafe {
-                let _ = PostMessageW(
-                    Some(target_hwnd),
-                    WM_VOICE_RESULT,
-                    WPARAM(Box::into_raw(text_box) as usize),
-                    LPARAM(0),
-                );
+        match outcome {
+            VoiceOutcome::Success(text) => {
+                let text_box = Box::new(text);
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(target_hwnd),
+                        WM_VOICE_RESULT,
+                        WPARAM(Box::into_raw(text_box) as usize),
+                        LPARAM(0),
+                    );
+                }
             }
-        } else {
-            unsafe {
-                let _ = PostMessageW(Some(target_hwnd), WM_VOICE_STOPPED, WPARAM(0), LPARAM(0));
+            VoiceOutcome::PermissionRequired => {
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(target_hwnd),
+                        WM_VOICE_PERMISSION_REQUIRED,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+            }
+            VoiceOutcome::Stopped => {
+                unsafe {
+                    let _ = PostMessageW(Some(target_hwnd), WM_VOICE_STOPPED, WPARAM(0), LPARAM(0));
+                }
             }
         }
     });
 }
 
-fn run_recognition_session() -> Option<String> {
+fn run_recognition_session() -> VoiceOutcome {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
 
-    let run_inner = || -> windows::core::Result<Option<String>> {
+    let outcome = (|| -> windows::core::Result<VoiceOutcome> {
         // 1. Create SpeechRecognizer
-        let recognizer = SpeechRecognizer::new()?;
+        let recognizer = match SpeechRecognizer::new() {
+            Ok(r) => r,
+            Err(e) => {
+                if is_permission_error(&e) {
+                    return Ok(VoiceOutcome::PermissionRequired);
+                }
+                return Err(e);
+            }
+        };
 
-        // 2. Define custom recognition constraints (Microsoft Learn guideline: Dictation topic constraint)
-        let dictation_constraint = SpeechRecognitionTopicConstraint::Create(
+        // 2. Define custom recognition constraints (Microsoft Learn: Dictation topic constraint)
+        let dictation_constraint = match SpeechRecognitionTopicConstraint::Create(
             SpeechRecognitionScenario::Dictation,
             &HSTRING::from("dictation"),
-        )?;
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                if is_permission_error(&e) {
+                    return Ok(VoiceOutcome::PermissionRequired);
+                }
+                return Err(e);
+            }
+        };
 
-        let constraints = recognizer.Constraints()?;
-        constraints.Append(&dictation_constraint)?;
+        if let Ok(constraints) = recognizer.Constraints() {
+            let _ = constraints.Append(&dictation_constraint);
+        }
 
         // 3. Compile constraints
-        let compile_op = recognizer.CompileConstraintsAsync()?;
+        let compile_op = match recognizer.CompileConstraintsAsync() {
+            Ok(op) => op,
+            Err(e) => {
+                if is_permission_error(&e) {
+                    return Ok(VoiceOutcome::PermissionRequired);
+                }
+                return Err(e);
+            }
+        };
+
         let compile_res = match await_future(compile_op.into_future(), Duration::from_secs(10)) {
             Some(Ok(res)) => res,
-            _ => return Ok(None),
+            Some(Err(e)) => {
+                if is_permission_error(&e) {
+                    return Ok(VoiceOutcome::PermissionRequired);
+                }
+                return Ok(VoiceOutcome::Stopped);
+            }
+            None => return Ok(VoiceOutcome::Stopped),
         };
 
         if compile_res.Status()? != SpeechRecognitionResultStatus::Success {
-            return Ok(None);
+            return Ok(VoiceOutcome::Stopped);
         }
 
         // 4. Configure 30-second timeouts
@@ -152,28 +249,48 @@ fn run_recognition_session() -> Option<String> {
         }
 
         // 5. Start recognition (up to 30 seconds)
-        let recognize_op = recognizer.RecognizeAsync()?;
+        let recognize_op = match recognizer.RecognizeAsync() {
+            Ok(op) => op,
+            Err(e) => {
+                if is_permission_error(&e) {
+                    return Ok(VoiceOutcome::PermissionRequired);
+                }
+                return Err(e);
+            }
+        };
+
         let recognize_res = match await_future(recognize_op.into_future(), Duration::from_secs(31)) {
             Some(Ok(res)) => res,
-            _ => return Ok(None),
+            Some(Err(e)) => {
+                if is_permission_error(&e) {
+                    return Ok(VoiceOutcome::PermissionRequired);
+                }
+                return Ok(VoiceOutcome::Stopped);
+            }
+            None => return Ok(VoiceOutcome::Stopped),
         };
 
         if recognize_res.Status()? == SpeechRecognitionResultStatus::Success {
             let text = recognize_res.Text()?.to_string_lossy();
             let trimmed = text.trim();
             if !trimmed.is_empty() {
-                return Ok(Some(trimmed.to_string()));
+                return Ok(VoiceOutcome::Success(trimmed.to_string()));
             }
         }
 
-        Ok(None)
-    };
-
-    let result = run_inner().unwrap_or(None);
+        Ok(VoiceOutcome::Stopped)
+    })()
+    .unwrap_or_else(|e| {
+        if is_permission_error(&e) {
+            VoiceOutcome::PermissionRequired
+        } else {
+            VoiceOutcome::Stopped
+        }
+    });
 
     unsafe {
         CoUninitialize();
     }
 
-    result
+    outcome
 }
