@@ -1,0 +1,40 @@
+[package]
+name = "floating-todo"
+version = "0.1.0"
+edition = "2021"
+description = "Ultra-lightweight floating TODO window for Windows"
+
+[dependencies]
+windows = { version = "0.62", features = [
+    # Core types: HWND, BOOL, RECT, POINT, HINSTANCE, etc.
+    "Win32_Foundation",
+    # Window creation, message loop, WndProc, child controls
+    "Win32_UI_WindowsAndMessaging",
+    # GDI: fonts, brushes, device contexts, owner-draw painting
+    "Win32_Graphics_Gdi",
+    # Common controls (EDIT, BUTTON, LISTBOX)
+    "Win32_UI_Controls",
+    # System tray (Shell_NotifyIconW, NOTIFYICONDATAW)
+    "Win32_UI_Shell",
+    # GetModuleHandleW
+    "Win32_System_LibraryLoader",
+    # DPI awareness (SetProcessDpiAwarenessContext)
+    "Win32_UI_HiDpi",
+    # DWM dark mode (DwmSetWindowAttribute)
+    "Win32_Graphics_Dwm",
+    # Global hotkey (RegisterHotKey, UnregisterHotKey, VK_*)
+    "Win32_UI_Input_KeyboardAndMouse",
+    # Console attach for CLI --version
+    "Win32_System_Console",
+]}
+
+# JSON persistence (minimal features to reduce binary size)
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+
+[profile.release]
+opt-level = "z"        # Optimize aggressively for binary size
+lto = true             # Full link-time optimization
+codegen-units = 1      # Single codegen unit for maximum LTO
+strip = true           # Strip debug symbols and metadata
+panic = "abort"        # Abort on panic (removes unwinding machinery)
