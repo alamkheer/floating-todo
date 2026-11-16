@@ -1,6 +1,6 @@
 [package]
 name = "floating-todo"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2021"
 description = "Ultra-lightweight floating TODO window for Windows"
 
