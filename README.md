@@ -175,17 +175,19 @@ panic = "abort"        # Abort on panic (removes unwinding machinery)
 Deploy the application using the automated `install.ps1` script:
 
 ```powershell
-# 1. Standard install (installs to %LOCALAPPDATA%\FloatingTodo)
+# 1. Interactive install / update / build / uninstall wizard (Recommended)
+# When run alone, it detects existing versions, prompts to build a new version with Docker (incrementing patch version),
+# prompts for uninstall if already installed, and interactively collects setup options.
 .\install.ps1
 
-# 2. Install with automatic startup on Windows login
-.\install.ps1 -AutoStart
+# 2. Build a new Docker version (bumps patch in Cargo.toml) and install interactively
+.\install.ps1 -Build
 
-# 3. Install with Start Menu shortcut
-.\install.ps1 -Shortcut
+# 3. Automated unattended build and install with specific flags
+.\install.ps1 -Build -AutoStart -Shortcut -Launch -NonInteractive
 
-# 4. Full installation (Start Menu shortcut + AutoStart on boot)
-.\install.ps1 -AutoStart -Shortcut
+# 4. Direct graceful uninstall (removes app, shortcuts, and autostart registry gracefully)
+.\install.ps1 -Uninstall
 ```
 
 ### Installation File Paths
@@ -198,26 +200,19 @@ Deploy the application using the automated `install.ps1` script:
   `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\FloatingTodo`
 - **Start Menu Shortcut:**  
   `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Floating TODO.lnk`
+- **Desktop Shortcut (Optional):**  
+  `%USERPROFILE%\Desktop\Floating TODO.lnk`
 
 ### Uninstallation
 
-To remove Floating TODO completely, run the following PowerShell commands:
+Floating TODO provides a graceful uninstaller directly within `install.ps1` that never performs hidden or forced deletes:
 
 ```powershell
-# Stop running instance
-Stop-Process -Name "floating-todo" -Force -ErrorAction SilentlyContinue
-
-# Remove autostart registry entry
-Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "FloatingTodo" -ErrorAction SilentlyContinue
-
-# Remove Start Menu shortcut
-Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Floating TODO.lnk" -ErrorAction SilentlyContinue
-
-# Remove application directory
-Remove-Item -Recurse -Force "$env:LOCALAPPDATA\FloatingTodo"
+# Graceful uninstallation (prompts before closing running processes or removing task data)
+.\install.ps1 -Uninstall
 ```
 
-*(Note: If you wish to preserve your saved tasks, keep `%APPDATA%\FloatingTodo\tasks.json`)*.
+*Note: The uninstaller prompts whether to preserve your saved tasks at `%APPDATA%\FloatingTodo\tasks.json` (default: Preserve).*
 
 ---
 
