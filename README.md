@@ -10,411 +10,122 @@ Floating TODO is a high-performance Windows desktop companion designed for devel
 
 ---
 
-## Table of Contents
+## Quick Start
 
-1. [Features](#features)
-2. [Keyboard Shortcuts & Controls](#keyboard-shortcuts--controls)
-3. [Architecture & Project Layout](#architecture--project-layout)
-4. [Prerequisites](#prerequisites)
-5. [Building from Source](#building-from-source)
-6. [Installation & Setup](#installation--setup)
-7. [App Publish Versioning & Error Debugging](#app-publish-versioning--error-debugging)
-   - [Why Versioning Matters for Debugging](#why-versioning-matters-for-debugging)
-   - [How Versioning is Embedded (Windows PE Resource)](#how-versioning-is-embedded-windows-pe-resource)
-   - [Checking the App Version](#checking-the-app-version)
-   - [Publishing a New Release](#publishing-a-new-release)
-   - [Debugging Errors Under Specific Versions](#debugging-errors-under-specific-versions)
-8. [Storage & Data Persistence](#storage--data-persistence)
-9. [Troubleshooting](#troubleshooting)
-10. [License](#license)
+### 1. Run the Executable Directly
+If you already have `floating-todo.exe`:
+```powershell
+.\floating-todo.exe
+```
 
----
+### 2. Build with Docker (One Command)
+No Rust or Visual Studio installation required on host:
+```powershell
+.\build.ps1
+```
 
-## Features
-
-- **Blazing Fast & Ultra-Lightweight:** Compiled with size-optimizing link-time optimization (`opt-level = "z"`, LTO, stripped binary), launching instantly.
-- **Voice Dictation Input (WinRT Speech Recognition):** One-click 30-second voice dictation powered by `Windows.Media.SpeechRecognition` with speech topic dictation constraints. Features real-time countdown timer and automatically adds recognized speech as a new task entry.
-- **Hierarchical Sub-Tasks & Cascading Completion:** Select any active task and click `＋ Sub` to attach sub-tasks. Indented with clean `└─` visual tree indicators. Automatically marks the parent task completed when all sub-tasks are done, and re-opens the parent if any sub-task is unchecked.
-- **Quick-Delete for Done Tasks:** Completed tasks feature a small `🗑` emoji delete button for immediate, clutter-free task cleanup.
-- **Modern Emoji Header Controls & Balloon Tooltips:** Native `📌` Always-on-Top toggle, `🎙️` Voice Dictation trigger, and rich balloon popovers (`tooltips_class32`) explaining each control.
-- **Full Keyboard Accessibility:** Seamless `Tab` and `Shift + Tab` navigation through all buttons, inputs, and list items with native focus rectangles (`ODS_FOCUS`). Use `Space` to toggle completion and `Delete` to remove items directly in the list.
-- **Native Dark Theme:** Owner-drawn controls using Win32 GDI with Desktop Window Manager (DWM) immersive dark titlebar integration (`DwmSetWindowAttribute`).
-- **Per-Monitor V2 High-DPI Aware:** Configured prior to window initialization (`SetProcessDpiAwarenessContext`), ensuring crisp text and correct layouts on multi-monitor setups with mixed scaling (100%, 125%, 150%, 200%).
-- **Global Hotkey:** Press `Ctrl + Shift + T` from anywhere in Windows to immediately toggle or focus the floating window.
-- **Always-on-Top Pinning:** Pin the window to float above all other applications, or unpin it to behave like a standard window.
-- **Frameless Draggable Window:** Clean borderless design; simply drag anywhere along the top header bar to reposition.
-- **System Tray Companion:** Closing the window minimizes it directly to the Windows system tray. The tray context menu offers instant visibility toggle, pin status toggle, version inspection, and clean exit.
-- **Smart Filtering:** Switch effortlessly between **All**, **Active**, and **Done** task views.
-- **Crash-Resilient Atomic Persistence:** Tasks are stored in `%APPDATA%\FloatingTodo\tasks.json` using atomic temporary file swaps (`.tmp` write followed by atomic rename) with complete backward compatibility for legacy v1 format.
+### 3. Install or Update (Interactive Wizard)
+Deploys to `%LOCALAPPDATA%\FloatingTodo`, registers shortcuts, and configures auto-start:
+```powershell
+.\install.ps1
+```
 
 ---
 
-## Keyboard Shortcuts & Controls
+## Release Executable Version & Publishing Information
+
+### Current Executable Specifications
+
+| Attribute | Specification |
+|---|---|
+| **Current Release Version** | `v0.2.3` |
+| **Target Architecture** | `x86_64-pc-windows-msvc` (64-bit AMD64) |
+| **Subsystem** | Windows GUI (`IMAGE_SUBSYSTEM_WINDOWS_GUI`) |
+| **Binary Footprint** | ~231 KB (LTO stripped, `opt-level = "z"`) |
+| **Dependencies** | 0 external runtime DLLs (statically bound to Windows OS subsystem) |
+
+### Embedded Windows PE Version Metadata
+
+Every release build of Floating TODO automatically generates and embeds a native Windows Portable Executable (PE) `VERSIONINFO` resource into the binary headers via `build.rs`.
+
+This ensures that:
+- **Windows Event Viewer** records the exact application version on crashes (`Event ID: 1000`) instead of `0.0.0.0`.
+- **Windows Error Reporting (WER)** crash dumps and minidumps contain accurate build headers.
+- **System Tray & File Explorer** expose official version metadata to users without developer tools.
+
+### Checking the Release Version
+
+You can verify the release version through any of the following methods:
+
+```powershell
+# 1. Command-Line Interface flag
+.\floating-todo.exe --version
+
+# 2. PowerShell file version query
+(Get-Item .\floating-todo.exe).VersionInfo | Format-List FileVersion, ProductVersion, FileDescription
+```
+
+- **File Explorer:** Right-click `floating-todo.exe` → **Properties** → **Details** tab.
+- **System Tray:** Hover over the system tray icon, or right-click to view the version header in the context menu.
+
+### Publishing a New Release
+
+Floating TODO supports both automated CI/CD publishing and local release creation:
+
+#### Method A: Automated GitHub Actions CI/CD (Recommended)
+The repository includes an automated release workflow (`.github/workflows/release.yml`):
+1. Bump the version in `Cargo.toml`:
+   ```toml
+   [package]
+   version = "0.2.4"
+   ```
+2. Commit and push a git release tag:
+   ```powershell
+   git commit -am "Release v0.2.4"
+   git tag -a v0.2.4 -m "Release v0.2.4"
+   git push origin main --tags
+   ```
+3. GitHub Actions builds the release executable, generates cryptographic SHA-256 checksums (`floating-todo-v0.2.4.exe.sha256`), and publishes a new GitHub Release with release notes.
+
+#### Method B: Local Automated Build & Version Bump
+Run the installer with the `-Build` flag to increment the patch version, compile via Docker, and update `Cargo.toml`:
+```powershell
+.\install.ps1 -Build
+```
+
+For full details on versioning architecture and release workflows, see [docs/versioning-and-publishing.md](docs/versioning-and-publishing.md).
+
+---
+
+## Primary Controls & Shortcuts
 
 | Shortcut / Action | Scope | Description |
 |---|---|---|
 | `Ctrl + Shift + T` | Global (System-wide) | Toggle floating window visibility (Show / Hide / Focus). |
 | `Tab` / `Shift + Tab` | Window | Cycle keyboard focus forward and backward across all controls. |
-| `Enter` | Input Box | Adds a new parent task (or adds a sub-task if sub-task input mode is active). |
-| `Esc` | Input Box | Cancels sub-task input mode and returns to normal parent task entry. |
-| `Space` | List View | Toggles selected task or sub-task between active and completed. |
-| `Delete` | List View | Permanently deletes the selected task or sub-task. |
-| Left Click on `[✓]` | Task Item | Toggles task between active and completed. |
-| Left Click on `🗑` | Completed Task Item | Permanently deletes the completed entry. |
-| Click `＋ Sub` Button | Control Bar | Adds a sub-task to the currently selected active task. |
-| Click `🎙️` Button | Header Bar | Starts 30-second voice dictation (click again to cancel). |
-| Click Filter Buttons | Header Bar | Filters view: `All`, `Active`, `Done`. |
-| Click `📌` Pin Button | Header Bar | Toggles Always-on-Top mode (with hover balloon tooltip). |
-| Click `✕` Close Button | Header Bar | Minimizes widget to the System Tray. |
-| Right Click Tray Icon | System Tray | Opens context menu (Version, Show/Hide, Always-on-Top, Exit). |
-| Left Click Tray Icon | System Tray | Toggles window visibility. |
-| Drag Header Bar | Title Area | Repositions the floating window across monitors. |
+| `Enter` | Input Box | Adds a new parent task (or adds a sub-task if sub-task mode is active). |
+| `Esc` | Input Box | Cancels sub-task input mode. |
+| `Space` | List View | Toggles selected task between active and completed. |
+| `Delete` | List View | Permanently deletes the selected task. |
+| Click `＋ Sub` | Control Bar | Adds a sub-task to the currently selected active task. |
+| Click `🎙️` | Header Bar | Starts 30-second WinRT voice dictation. |
+| Click `📌` | Header Bar | Toggles Always-on-Top pinning mode. |
+| Click `✕` | Header Bar | Minimizes widget directly to the Windows System Tray. |
 
 ---
 
-## Architecture & Project Layout
-
-```
-windows-todo-app/
-├── assets/                     # Application assets and icon resources
-├── src/
-│   ├── main.rs                 # Entry point, CLI argument parser (--version), DPI awareness
-│   ├── window.rs               # Window class registration, WndProc, drag handling, timers, Tab nav
-│   ├── ui.rs                   # Win32 GDI owner-draw painting, dark palette, fonts, tooltips, controls
-│   ├── state.rs                # Central AppState, Task/SubTask structs, filter modes, cascade logic
-│   ├── storage.rs              # Atomic JSON persistence (%APPDATA%\FloatingTodo\tasks.json)
-│   ├── voice.rs                # WinRT SpeechRecognizer dictation constraints & async worker
-│   ├── tray.rs                 # System tray icon (Shell_NotifyIconW) & context menu
-│   └── hotkey.rs               # Global keyboard hotkey hook (Ctrl + Shift + T)
-├── build.rs                    # Auto-generates Windows PE VERSIONINFO resource from Cargo.toml
-├── build.ps1                   # Dockerized build script (produces optimized floating-todo.exe)
-├── install.ps1                 # Deployment script (AutoStart registry & Start Menu shortcut)
-├── Dockerfile                  # Hermetic cross-compilation environment (rust + cargo-xwin + MSVC SDK)
-├── Cargo.toml                  # Rust package manifest and aggressive size optimization flags
-└── README.md                   # Project documentation
-```
-
----
-
-## Prerequisites
-
-- **Operating System:** Windows 10 (Build 1809 or higher) or Windows 11 (64-bit).
-- **For Building (Option 1 - Recommended):** [Docker Desktop](https://www.docker.com/products/docker-desktop/) (no Windows SDK or MSVC installation needed on host).
-- **For Building (Option 2 - Native):**
-  - [Rust toolchain](https://www.rust-lang.org/) (stable, 2021 edition).
-  - Target: `rustup target add x86_64-pc-windows-msvc`.
-  - Visual Studio C++ Build Tools (including Windows SDK).
-
----
-
-## Building from Source
-
-### Method A: Automated Docker Build (Recommended)
-
-The project includes a hermetic Docker build environment using `cargo-xwin` and the Windows MSVC SDK. You do not need Rust or Visual Studio installed on your host machine.
-
-#### Option 1: One-Click PowerShell Script
-Run the automated build script:
-
-```powershell
-.\build.ps1
-```
-
-#### Option 2: Direct Docker Commands
-You can run the underlying Docker commands directly from any shell (PowerShell, Command Prompt, or Bash):
-
-```bash
-# 1. Build the Docker image containing Rust, cargo-xwin, and MSVC SDK
-docker build -t floating-todo-builder .
-
-# 2. Create a temporary container to extract the artifact
-docker create --name ftodo-extract floating-todo-builder
-
-# 3. Copy the compiled release executable to the project directory
-docker cp ftodo-extract:/app/target/x86_64-pc-windows-msvc/release/floating-todo.exe .\floating-todo.exe
-
-# 4. Remove the temporary container
-docker rm -f ftodo-extract
-```
-
-**What the Docker build does under the hood:**
-1. Pulls the base Rust image, installs `cargo-xwin`, Clang, and LLD.
-2. Cross-compiles the binary targeting `x86_64-pc-windows-msvc` with aggressive size optimization (`opt-level = "z"`, LTO, strip, abort-on-panic).
-3. Executes `build.rs` to compile the Windows PE version resource (`VERSIONINFO`) into `version.res` via `llvm-rc` and links it into the executable.
-4. Produces the standalone `floating-todo.exe` ready for deployment without host toolchain dependencies.
-
-### Method B: Native Windows Build (Cargo)
-
-If you have Rust and Visual Studio C++ Build Tools installed on Windows:
-
-```powershell
-# Compile release binary
-cargo build --release
-
-# The resulting binary is located at:
-# target\release\floating-todo.exe
-```
-
-### Binary Size Profile
-
-The release build is configured in `Cargo.toml` for minimal binary size:
-
-```toml
-[profile.release]
-opt-level = "z"        # Optimize aggressively for binary size
-lto = true             # Full link-time optimization across all crates
-codegen-units = 1      # Single codegen unit for maximum LTO compression
-strip = true           # Strip debug symbols and symbol tables
-panic = "abort"        # Abort on panic (removes unwinding machinery)
-```
-
----
-
-## Installation & Setup
-
-Deploy the application using the automated `install.ps1` script:
-
-```powershell
-# 1. Interactive install / update / build / uninstall wizard (Recommended)
-# When run alone, it detects existing versions, prompts to build a new version with Docker (incrementing patch version),
-# prompts for uninstall if already installed, and interactively collects setup options.
-.\install.ps1
-
-# 2. Build a new Docker version (bumps patch in Cargo.toml) and install interactively
-.\install.ps1 -Build
-
-# 3. Automated unattended build and install with specific flags
-.\install.ps1 -Build -AutoStart -Shortcut -Launch -NonInteractive
-
-# 4. Direct graceful uninstall (removes app, shortcuts, and autostart registry gracefully)
-.\install.ps1 -Uninstall
-```
-
-### Installation File Paths
-
-- **Application Binary:**  
-  `%LOCALAPPDATA%\FloatingTodo\floating-todo.exe`
-- **Task Storage File:**  
-  `%APPDATA%\FloatingTodo\tasks.json`
-- **Auto-Start Registry Entry:**  
-  `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\FloatingTodo`
-- **Start Menu Shortcut:**  
-  `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Floating TODO.lnk`
-- **Desktop Shortcut (Optional):**  
-  `%USERPROFILE%\Desktop\Floating TODO.lnk`
-
-### Uninstallation
-
-Floating TODO provides a graceful uninstaller directly within `install.ps1` that never performs hidden or forced deletes:
-
-```powershell
-# Graceful uninstallation (prompts before closing running processes or removing task data)
-.\install.ps1 -Uninstall
-```
-
-*Note: The uninstaller prompts whether to preserve your saved tasks at `%APPDATA%\FloatingTodo\tasks.json` (default: Preserve).*
-
----
-
-## App Publish Versioning & Error Debugging
-
-### Why Versioning Matters for Debugging
-
-When publishing a native Windows desktop app, proper versioning is critical for debugging crashes and error reports:
-
-1. **Windows Event Viewer & Error Reporting (WER):** When a crash occurs, Windows records an Application Error (`Event ID: 1000`). If the binary lacks embedded Windows PE version metadata, Event Viewer reports the application version as `0.0.0.0` or empty. With embedded metadata, Event Viewer records the exact version (e.g., `0.1.0.0`), allowing developers to pinpoint which release failed.
-2. **Crash Dump Analysis:** User-generated minidumps (`.dmp`) store module version headers. Having exact version metadata ensures symbol servers or local `.pdb` files match the crashed executable.
-3. **User Bug Reports:** Users can check their installed version directly via the CLI, Explorer properties, or System Tray without needing developer tools.
-
----
-
-### How Versioning is Embedded (Windows PE Resource)
-
-Floating TODO uses a dedicated `build.rs` script that hooks into the build pipeline:
-1. It reads `version`, `name`, and `description` directly from `Cargo.toml` (`CARGO_PKG_VERSION`).
-2. It dynamically synthesizes a Windows Resource file (`version.rc`) containing a complete `VERSIONINFO` structure:
-   - `FILEVERSION` & `PRODUCTVERSION` (e.g. `0,1,0,0`)
-   - `FileVersion` & `ProductVersion` strings
-   - `FileDescription`, `InternalName`, and `OriginalFilename`
-3. It compiles the resource using `llvm-rc` / `rc.exe` into an object (`.res`) and instructs the linker (`lld-link`) to embed it directly into the final Portable Executable (PE) headers.
-
----
-
-### Checking the App Version
-
-You can verify the published version through multiple methods:
-
-#### 1. Command-Line Interface (`--version` / `-v`)
-Run the executable with the version flag from PowerShell or Command Prompt:
-
-```powershell
-.\floating-todo.exe --version
-```
-
-Output:
-```text
-Floating TODO v0.2.0
-Architecture: x86_64-pc-windows-msvc
-Edition: 2021
-Config: %APPDATA%\FloatingTodo\tasks.json
-Hotkeys: Ctrl+Shift+T (Toggle show/hide)
-```
-*(If run from outside a console, e.g. via Windows Run dialog, it opens an informational dialog box).*
-
-#### 2. PowerShell File Version Query
-Query the embedded Windows PE header:
-
-```powershell
-(Get-Item .\floating-todo.exe).VersionInfo | Format-List FileVersion, ProductVersion, FileDescription
-```
-
-Output:
-```text
-FileVersion     : 0.2.0.0
-ProductVersion  : 0.2.0
-FileDescription : Ultra-lightweight floating TODO window for Windows
-```
-
-#### 3. Windows File Explorer GUI
-- Right-click `floating-todo.exe` → Select **Properties**.
-- Navigate to the **Details** tab.
-- Inspect **File version**, **Product name**, and **Product version**.
-
-#### 4. In-App System Tray
-- **Hover:** Hover your mouse over the system tray icon to view the tooltip: `Floating TODO v0.2.0`.
-- **Right-Click:** The top header of the context menu explicitly displays the active version.
-
----
-
-### Publishing a New Release
-
-To publish a new version of Floating TODO:
-
-1. **Update `Cargo.toml`:**
-   Increment the version number following [Semantic Versioning](https://semver.org/):
-   ```toml
-   [package]
-   name = "floating-todo"
-   version = "0.2.0" # Bump version here
-   ```
-2. **Rebuild the Executable:**
-   Using PowerShell:
-   ```powershell
-   .\build.ps1
-   ```
-   Or using direct Docker commands:
-   ```bash
-   docker build -t floating-todo-builder .
-   docker create --name ftodo-extract floating-todo-builder
-   docker cp ftodo-extract:/app/target/x86_64-pc-windows-msvc/release/floating-todo.exe .\floating-todo.exe
-   docker rm -f ftodo-extract
-   ```
-   `build.rs` automatically updates the embedded `VERSIONINFO` PE header and recompiles the binary with the new version stamp.
-3. **Create a Git Tag:**
-   ```powershell
-   git add Cargo.toml
-   git commit -m "Release v0.2.0"
-   git tag -a v0.2.0 -m "Release v0.2.0"
-   ```
-4. **Publish:**
-   Distribute `floating-todo.exe` via GitHub Releases or your deployment pipeline.
-
----
-
-### Debugging Errors Under Specific Versions
-
-When diagnosing errors or unexpected behavior reported on a specific version:
-
-#### 1. Diagnosing Crashes via Windows Event Viewer
-If the application closes unexpectedly:
-1. Press `Win + R`, type `eventvwr.msc`, and press **Enter**.
-2. Navigate to **Windows Logs** → **Application**.
-3. In the right pane, click **Filter Current Log...** and enter `1000` in the Event IDs box.
-4. Locate the error entry for `floating-todo.exe`:
-   ```text
-   Faulting application name: floating-todo.exe, version: 0.1.0.0
-   Faulting module name: ntdll.dll, version: 10.0.22621.1
-   Exception code: 0xc0000005
-   Fault offset: 0x0000000000012345
-   Faulting process id: 0x1a2b
-   ```
-5. Check the `version` field in the log to confirm whether the user is on the latest version or an older build.
-
-#### 2. Inspecting Crash Dumps (WER)
-Windows Error Reporting generates crash dump files in:
-```powershell
-%LOCALAPPDATA%\CrashDumps\floating-todo.exe.*.dmp
-```
-Open these dump files in **Visual Studio** or **WinDbg** to inspect the call stack at the time of failure.
-
-#### 3. Building with Debug Symbols for Development
-Because the release profile strips symbols (`strip = true`) and aborts on panic (`panic = "abort"`), reproduce tricky bugs with an unstripped build:
-
-```powershell
-# Build in debug mode (keeps symbols and stack unwinding)
-cargo build
-
-# Run with full backtrace enabled
-$env:RUST_BACKTRACE=1
-.\target\debug\floating-todo.exe
-```
-
-#### 4. Validating and Recovering Corrupted Tasks JSON
-If tasks fail to load, check the persistence directory:
-```powershell
-Get-Content "$env:APPDATA\FloatingTodo\tasks.json" | ConvertFrom-Json
-```
-If the file is damaged, check if a temporary write was left behind:
-```powershell
-Test-Path "$env:APPDATA\FloatingTodo\tasks.json.tmp"
-```
-
-#### 5. Resolving Global Hotkey Conflicts
-If `Ctrl + Shift + T` does not toggle the window:
-- Another application (e.g. Google Chrome "Reopen closed tab", Microsoft PowerToys, or an IDE) may have registered `Ctrl + Shift + T` first.
-- The app handles this gracefully without crashing; `RegisterHotKey` returns `None` and the app continues running via the system tray icon.
-- You can change the registered hotkey combination in `src/hotkey.rs`:
-  ```rust
-  RegisterHotKey(Some(hwnd), HOTKEY_TOGGLE_ID, MOD_CONTROL | MOD_SHIFT, VK_T.0 as u32);
-  ```
-
----
-
-## Storage & Data Persistence
-
-Tasks are persisted as JSON in `%APPDATA%\FloatingTodo\tasks.json`.
-
-```json
-{
-  "next_id": 3,
-  "tasks": [
-    {
-      "id": 1,
-      "text": "Review pull request #42",
-      "completed": false
-    },
-    {
-      "id": 2,
-      "text": "Deploy release v0.1.0",
-      "completed": true
-    }
-  ]
-}
-```
-
-- **Debounced Saving:** Edits to tasks trigger a 2-second debounce timer (`SAVE_DEBOUNCE_MS`), batching rapid keystrokes to minimize disk I/O.
-- **Atomic File Swapping:** The app writes to `tasks.json.tmp`, flushes buffers to disk (`sync_all`), and atomically renames the temporary file over `tasks.json` to prevent partial writes if power is cut.
-
----
-
-## Troubleshooting
-
-| Issue | Cause | Solution |
-|---|---|---|
-| `Ctrl + Shift + T` does nothing | Hotkey registered by another program | Close conflicting apps or trigger visibility via the System Tray icon. |
-| Window disappears | Minimized to tray | Check the Windows taskbar system tray area; click the Floating TODO icon. |
-| Tasks not saving | File permissions in `%APPDATA%` | Ensure `%APPDATA%\FloatingTodo` is writable by the current user. |
-| Docker build error | Docker Desktop daemon not running | Launch Docker Desktop and verify with `docker info` in PowerShell. |
+## Documentation Index
+
+Detailed technical guides and documentation are organized in the [docs/](docs/) directory:
+
+| Document | Description |
+|---|---|
+| [User Guide & Controls](docs/user-guide.md) | Comprehensive feature tour, keyboard navigation, voice dictation, and sub-task cascading logic. |
+| [Architecture & System Design](docs/architecture.md) | Project layout, Win32 raw API bindings, atomic JSON persistence, and performance benchmarks. |
+| [Building from Source](docs/building.md) | Hermetic Docker build pipeline, native Windows Cargo compilation, and compiler optimization flags. |
+| [Installation & Deployment](docs/installation.md) | Interactive installer, unattended switches, file paths, and graceful uninstallation. |
+| [App Versioning & Publishing](docs/versioning-and-publishing.md) | PE `VERSIONINFO` embedding, version verification, CI/CD pipeline, and release checksums. |
+| [Debugging & Troubleshooting](docs/troubleshooting.md) | Windows Event Viewer diagnostics, crash dump analysis, corrupted storage recovery, and hotkey conflict resolution. |
 
 ---
 

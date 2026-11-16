@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+#![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod hotkey;
 mod state;
@@ -46,11 +46,12 @@ fn main() -> windows::core::Result<()> {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 
-    // 2. Load persisted tasks
-    let (tasks, next_id) = storage::load_tasks();
+    // 2. Load persisted tasks and config
+    let (tasks, next_id, config) = storage::load_tasks();
     let mut state = Box::new(state::AppState::new());
     state.tasks = tasks;
     state.next_id = next_id;
+    state.config = config;
 
     // 3. Create the main window (passes state ownership into GWLP_USERDATA)
     let hwnd = window::create_main_window(state)?;

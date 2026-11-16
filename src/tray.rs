@@ -105,8 +105,8 @@ pub fn handle_menu_command(hwnd: HWND, cmd_id: u16) {
         }
         IDM_TOGGLE_PIN => {
             if let Some(state) = unsafe { crate::window::get_state(hwnd) } {
-                state.is_topmost = !state.is_topmost;
-                let pos = if state.is_topmost {
+                state.config.is_topmost = !state.config.is_topmost;
+                let pos = if state.config.is_topmost {
                     HWND_TOPMOST
                 } else {
                     HWND_NOTOPMOST

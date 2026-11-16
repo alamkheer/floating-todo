@@ -16,6 +16,8 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
+use crate::state::{log_event, LogLevel};
+
 pub const WM_VOICE_RESULT: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 101;
 pub const WM_VOICE_STOPPED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 102;
 pub const WM_VOICE_PERMISSION_REQUIRED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 103;
@@ -121,23 +123,22 @@ pub fn prompt_speech_permission(hwnd: HWND) {
     }
 }
 
-/// Spawns a background thread to record voice for up to 30 seconds using
+/// Spawns a background thread to record voice for the configured duration using
 /// WinRT SpeechRecognizer with a Dictation topic constraint.
-///
-/// On completion:
-/// - Success: Posts WM_VOICE_RESULT with `*mut String` as WPARAM
-/// - Permission error: Posts WM_VOICE_PERMISSION_REQUIRED
-/// - Cancelled/Timeout: Posts WM_VOICE_STOPPED
-pub fn start_voice_recognition(hwnd: HWND) {
+pub fn start_voice_recognition(hwnd: HWND, duration_secs: u32) {
     if RECORDING_ACTIVE.swap(true, Ordering::SeqCst) {
-        // Already recording; return early
+        log_event(LogLevel::Warn, "Voice recognition session is already active.");
         return;
     }
 
     let hwnd_raw = hwnd.0 as usize;
+    log_event(
+        LogLevel::Info,
+        &format!("Starting voice recognition (timeout: {}s)...", duration_secs),
+    );
 
     thread::spawn(move || {
-        let outcome = run_recognition_session();
+        let outcome = run_recognition_session(duration_secs);
 
         RECORDING_ACTIVE.store(false, Ordering::SeqCst);
 
@@ -145,6 +146,10 @@ pub fn start_voice_recognition(hwnd: HWND) {
 
         match outcome {
             VoiceOutcome::Success(text) => {
+                log_event(
+                    LogLevel::Info,
+                    &format!("Speech recognized successfully: \"{}\"", text),
+                );
                 let text_box = Box::new(text);
                 unsafe {
                     let _ = PostMessageW(
@@ -156,6 +161,10 @@ pub fn start_voice_recognition(hwnd: HWND) {
                 }
             }
             VoiceOutcome::PermissionRequired => {
+                log_event(
+                    LogLevel::Error,
+                    "Microphone or Windows Speech Recognition permission required.",
+                );
                 unsafe {
                     let _ = PostMessageW(
                         Some(target_hwnd),
@@ -174,7 +183,7 @@ pub fn start_voice_recognition(hwnd: HWND) {
     });
 }
 
-fn run_recognition_session() -> VoiceOutcome {
+fn run_recognition_session(duration_secs: u32) -> VoiceOutcome {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
@@ -184,6 +193,10 @@ fn run_recognition_session() -> VoiceOutcome {
         let recognizer = match SpeechRecognizer::new() {
             Ok(r) => r,
             Err(e) => {
+                log_event(
+                    LogLevel::Error,
+                    &format!("Failed to create SpeechRecognizer: {}", e),
+                );
                 if is_permission_error(&e) {
                     return Ok(VoiceOutcome::PermissionRequired);
                 }
@@ -191,13 +204,17 @@ fn run_recognition_session() -> VoiceOutcome {
             }
         };
 
-        // 2. Define custom recognition constraints (Microsoft Learn: Dictation topic constraint)
+        // 2. Define custom recognition constraints (Dictation topic constraint)
         let dictation_constraint = match SpeechRecognitionTopicConstraint::Create(
             SpeechRecognitionScenario::Dictation,
             &HSTRING::from("dictation"),
         ) {
             Ok(c) => c,
             Err(e) => {
+                log_event(
+                    LogLevel::Warn,
+                    &format!("Speech dictation topic constraint failed: {}", e),
+                );
                 if is_permission_error(&e) {
                     return Ok(VoiceOutcome::PermissionRequired);
                 }
@@ -213,6 +230,10 @@ fn run_recognition_session() -> VoiceOutcome {
         let compile_op = match recognizer.CompileConstraintsAsync() {
             Ok(op) => op,
             Err(e) => {
+                log_event(
+                    LogLevel::Error,
+                    &format!("CompileConstraintsAsync failed: {}", e),
+                );
                 if is_permission_error(&e) {
                     return Ok(VoiceOutcome::PermissionRequired);
                 }
@@ -223,35 +244,52 @@ fn run_recognition_session() -> VoiceOutcome {
         let compile_res = match await_future(compile_op.into_future(), Duration::from_secs(10)) {
             Some(Ok(res)) => res,
             Some(Err(e)) => {
+                log_event(
+                    LogLevel::Error,
+                    &format!("CompileConstraintsAsync returned error: {}", e),
+                );
                 if is_permission_error(&e) {
                     return Ok(VoiceOutcome::PermissionRequired);
                 }
                 return Ok(VoiceOutcome::Stopped);
             }
-            None => return Ok(VoiceOutcome::Stopped),
+            None => {
+                log_event(LogLevel::Warn, "Constraint compilation timed out.");
+                return Ok(VoiceOutcome::Stopped);
+            }
         };
 
-        if compile_res.Status()? != SpeechRecognitionResultStatus::Success {
+        let compile_status = compile_res.Status()?;
+        if compile_status != SpeechRecognitionResultStatus::Success {
+            log_event(
+                LogLevel::Error,
+                &format!("Constraint compilation failed with status: {:?}", compile_status),
+            );
             return Ok(VoiceOutcome::Stopped);
         }
 
-        // 4. Configure 30-second timeouts
+        // 4. Configure timeouts according to user-selected duration
+        let duration_100ns = (duration_secs as i64) * 10_000_000;
         if let Ok(timeouts) = recognizer.Timeouts() {
             let _ = timeouts.SetInitialSilenceTimeout(TimeSpan {
-                Duration: 30 * 10_000_000,
+                Duration: duration_100ns,
             });
             let _ = timeouts.SetBabbleTimeout(TimeSpan {
-                Duration: 30 * 10_000_000,
+                Duration: duration_100ns,
             });
             let _ = timeouts.SetEndSilenceTimeout(TimeSpan {
                 Duration: 5 * 10_000_000,
             });
         }
 
-        // 5. Start recognition (up to 30 seconds)
+        // 5. Start recognition
         let recognize_op = match recognizer.RecognizeAsync() {
             Ok(op) => op,
             Err(e) => {
+                log_event(
+                    LogLevel::Error,
+                    &format!("RecognizeAsync initialization failed: {}", e),
+                );
                 if is_permission_error(&e) {
                     return Ok(VoiceOutcome::PermissionRequired);
                 }
@@ -259,28 +297,53 @@ fn run_recognition_session() -> VoiceOutcome {
             }
         };
 
-        let recognize_res = match await_future(recognize_op.into_future(), Duration::from_secs(31)) {
+        let recognize_res = match await_future(
+            recognize_op.into_future(),
+            Duration::from_secs((duration_secs + 1) as u64),
+        ) {
             Some(Ok(res)) => res,
             Some(Err(e)) => {
+                log_event(
+                    LogLevel::Error,
+                    &format!("Speech recognition evaluation error: {}", e),
+                );
                 if is_permission_error(&e) {
                     return Ok(VoiceOutcome::PermissionRequired);
                 }
                 return Ok(VoiceOutcome::Stopped);
             }
-            None => return Ok(VoiceOutcome::Stopped),
+            None => {
+                log_event(
+                    LogLevel::Warn,
+                    &format!("Speech recognition session timed out after {}s with no audio captured.", duration_secs),
+                );
+                return Ok(VoiceOutcome::Stopped);
+            }
         };
 
-        if recognize_res.Status()? == SpeechRecognitionResultStatus::Success {
+        let status = recognize_res.Status()?;
+        if status == SpeechRecognitionResultStatus::Success {
             let text = recognize_res.Text()?.to_string_lossy();
             let trimmed = text.trim();
             if !trimmed.is_empty() {
                 return Ok(VoiceOutcome::Success(trimmed.to_string()));
+            } else {
+                log_event(
+                    LogLevel::Warn,
+                    "Speech recognizer reported Success, but transcribed 0 characters (inaudible/silence).",
+                );
             }
+        } else {
+            log_event(
+                LogLevel::Warn,
+                &format!("Speech recognition finished with non-success status: {:?}. Ensure microphone is unmuted and set as default recording device.", status),
+            );
         }
 
         Ok(VoiceOutcome::Stopped)
     })()
     .unwrap_or_else(|e| {
+        log_event(LogLevel::Error, &format!("Voice recognition exception: {}", e));
         if is_permission_error(&e) {
             VoiceOutcome::PermissionRequired
         } else {

@@ -8,7 +8,7 @@ use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::hotkey;
-use crate::state::{AppState, ListItemRef};
+use crate::state::{AppState, SettingsSubPage, ViewMode};
 use crate::storage;
 use crate::tray;
 use crate::ui;
@@ -50,7 +50,7 @@ fn schedule_save(hwnd: HWND) {
     }
 }
 
-/// Subclass proc for the LISTBOX control to support keyboard shortcuts (Space to toggle, Delete to delete).
+/// Subclass proc for the LISTBOX control to support keyboard shortcuts.
 unsafe extern "system" fn list_subclass_proc(
     hwnd: HWND,
     msg: u32,
@@ -59,18 +59,35 @@ unsafe extern "system" fn list_subclass_proc(
     _uid: usize,
     _data: usize,
 ) -> LRESULT {
-    if msg == WM_KEYDOWN {
-        if let Ok(parent) = GetParent(hwnd) {
-            if wparam.0 == VK_SPACE.0 as usize {
-                let _ = PostMessageW(Some(parent), WM_LIST_TOGGLE, WPARAM(0), LPARAM(0));
-                return LRESULT(0);
-            } else if wparam.0 == VK_DELETE.0 as usize {
-                let _ = PostMessageW(Some(parent), WM_LIST_DELETE, WPARAM(0), LPARAM(0));
-                return LRESULT(0);
-            }
+    match msg {
+        WM_GETDLGCODE => {
+            let base = DefSubclassProc(hwnd, msg, wparam, lparam).0;
+            // Tell Windows dialog manager this listbox wants Tab and Arrow keys directly
+            LRESULT(base | (DLGC_WANTTAB as isize) | (DLGC_WANTALLKEYS as isize))
         }
+        WM_KEYDOWN => {
+            if let Ok(parent) = GetParent(hwnd) {
+                if wparam.0 == VK_SPACE.0 as usize {
+                    let _ = PostMessageW(Some(parent), WM_LIST_TOGGLE, WPARAM(0), LPARAM(0));
+                    return LRESULT(0);
+                } else if wparam.0 == VK_DELETE.0 as usize {
+                    let _ = PostMessageW(Some(parent), WM_LIST_DELETE, WPARAM(0), LPARAM(0));
+                    return LRESULT(0);
+                } else if wparam.0 == VK_TAB.0 as usize {
+                    let is_shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+                    let target_msg = if is_shift {
+                        ui::WM_LIST_OUTDENT
+                    } else {
+                        ui::WM_LIST_INDENT
+                    };
+                    let _ = PostMessageW(Some(parent), target_msg, WPARAM(0), LPARAM(0));
+                    return LRESULT(0);
+                }
+            }
+            DefSubclassProc(hwnd, msg, wparam, lparam)
+        }
+        _ => DefSubclassProc(hwnd, msg, wparam, lparam),
     }
-    DefSubclassProc(hwnd, msg, wparam, lparam)
 }
 
 /// The main window procedure.
@@ -104,7 +121,7 @@ unsafe extern "system" fn wnd_proc(
 
                 // Create fonts and apply to controls
                 let font_normal = Box::leak(Box::new(ui::Font::new(16, false)));
-                let font_small = Box::leak(Box::new(ui::Font::new(13, false)));
+                let font_small = Box::leak(Box::new(ui::Font::new(12, false)));
                 let font_emoji = Box::leak(Box::new(ui::Font::emoji_font(15)));
 
                 ui::set_font(state.hwnd_input, font_normal);
@@ -115,24 +132,33 @@ unsafe extern "system" fn wnd_proc(
                 ui::set_font(state.hwnd_filter_done, font_small);
                 ui::set_font(state.hwnd_add_sub_btn, font_small);
                 ui::set_font(state.hwnd_pin_btn, font_emoji);
+                ui::set_font(state.hwnd_settings_btn, font_emoji);
                 ui::set_font(state.hwnd_close_btn, font_normal);
 
-                // Subclass listbox for Space (toggle) and Delete (remove)
-                let _ = SetWindowSubclass(
-                    state.hwnd_list,
-                    Some(list_subclass_proc),
-                    2,
-                    0,
-                );
+                ui::set_font(state.hwnd_tab_settings, font_small);
+                ui::set_font(state.hwnd_tab_info, font_small);
+                ui::set_font(state.hwnd_tab_logs, font_small);
+                ui::set_font(state.hwnd_btn_rec_7, font_small);
+                ui::set_font(state.hwnd_btn_rec_15, font_small);
+                ui::set_font(state.hwnd_btn_rec_30, font_small);
+                ui::set_font(state.hwnd_btn_depth_1, font_small);
+                ui::set_font(state.hwnd_btn_depth_2, font_small);
+                ui::set_font(state.hwnd_btn_depth_3, font_small);
+                ui::set_font(state.hwnd_btn_test_mic, font_small);
+                ui::set_font(state.hwnd_btn_clear_logs, font_small);
+                ui::set_font(state.hwnd_btn_back, font_small);
 
-                // Populate the list from loaded tasks
+                // Subclass listbox for Space (toggle), Delete (remove), and Tab (indent/outdent)
+                let _ = SetWindowSubclass(state.hwnd_list, Some(list_subclass_proc), 2, 0);
+
+                // Populate list from loaded tasks
                 ui::refresh_task_list(state);
             }
 
             LRESULT(0)
         }
 
-        // ── Make the frameless window draggable by header area ──
+        // ── Make frameless window draggable by header area ──
         WM_NCHITTEST => {
             let result = DefWindowProcW(hwnd, msg, wparam, lparam);
             if result == LRESULT(HTCLIENT as isize) {
@@ -146,7 +172,7 @@ unsafe extern "system" fn wnd_proc(
             result
         }
 
-        // ── Paint header background ──
+        // ── Paint header background, title, settings view content & footer ──
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
@@ -172,20 +198,32 @@ unsafe extern "system" fn wnd_proc(
             let mut title_rc = RECT {
                 left: 10,
                 top: 0,
-                right: WIN_WIDTH - 70,
+                right: WIN_WIDTH - 100, // Leave room for 📌, ⚙, ✕
                 bottom: ui::HEADER_HEIGHT,
             };
-            let mut title: Vec<u16> = "Floating TODO".encode_utf16().collect();
-            DrawTextW(
-                hdc,
-                &mut title,
-                &mut title_rc,
-                DT_SINGLELINE | DT_VCENTER,
-            );
+
+            let title_str = if let Some(state) = get_state(hwnd) {
+                match state.view_mode {
+                    ViewMode::Tasks => "Floating TODO",
+                    ViewMode::Settings(_) => "Settings",
+                }
+            } else {
+                "Floating TODO"
+            };
+
+            let mut title: Vec<u16> = title_str.encode_utf16().collect();
+            DrawTextW(hdc, &mut title, &mut title_rc, DT_SINGLELINE | DT_VCENTER);
 
             SelectObject(hdc, old_font);
 
-            // ── Very bottom placeholder text denoting version ──
+            // If in Settings view, draw settings sub-page content in client area
+            if let Some(state) = get_state(hwnd) {
+                if matches!(state.view_mode, ViewMode::Settings(_)) {
+                    ui::draw_settings_content(state, hdc, WIN_WIDTH);
+                }
+            }
+
+            // ── Footer placeholder text denoting version ──
             let footer_y = WIN_HEIGHT - ui::FOOTER_HEIGHT;
             let footer_rc = RECT {
                 left: 0,
@@ -208,7 +246,7 @@ unsafe extern "system" fn wnd_proc(
             FillRect(hdc, &sep_rc, sep_brush);
             let _ = DeleteObject(sep_brush.into());
 
-            // Version text (small, dimmed placeholder text at very bottom)
+            // Version text
             let ver_font = ui::Font::new(11, false);
             let old_ver_font = SelectObject(hdc, ver_font.handle().into());
             SetTextColor(hdc, COLORREF(ui::CLR_TEXT_DIM));
@@ -244,7 +282,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(1)
         }
 
-        // ── Color the EDIT control (dark theme) ──
+        // ── Color EDIT control (dark theme) ──
         WM_CTLCOLOREDIT => {
             let hdc = HDC(wparam.0 as *mut _);
             SetTextColor(hdc, COLORREF(ui::CLR_TEXT));
@@ -255,7 +293,7 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
 
-        // ── Color the LISTBOX control (dark theme) ──
+        // ── Color LISTBOX control (dark theme) ──
         WM_CTLCOLORLISTBOX => {
             let hdc = HDC(wparam.0 as *mut _);
             SetTextColor(hdc, COLORREF(ui::CLR_TEXT));
@@ -284,12 +322,25 @@ unsafe extern "system" fn wnd_proc(
                         ui::draw_task_item(state, dis);
                     }
                     ui::IDC_BTN_PIN
+                    | ui::IDC_BTN_SETTINGS
                     | ui::IDC_BTN_CLOSE
                     | ui::IDC_BTN_VOICE
                     | ui::IDC_BTN_ADD_SUB
                     | ui::IDC_BTN_FILTER_ALL
                     | ui::IDC_BTN_FILTER_ACTIVE
-                    | ui::IDC_BTN_FILTER_DONE => {
+                    | ui::IDC_BTN_FILTER_DONE
+                    | ui::IDC_BTN_TAB_SETTINGS
+                    | ui::IDC_BTN_TAB_INFO
+                    | ui::IDC_BTN_TAB_LOGS
+                    | ui::IDC_BTN_REC_7
+                    | ui::IDC_BTN_REC_15
+                    | ui::IDC_BTN_REC_30
+                    | ui::IDC_BTN_DEPTH_1
+                    | ui::IDC_BTN_DEPTH_2
+                    | ui::IDC_BTN_DEPTH_3
+                    | ui::IDC_BTN_TEST_MIC
+                    | ui::IDC_BTN_CLEAR_LOGS
+                    | ui::IDC_BTN_BACK => {
                         ui::draw_button(state, dis);
                     }
                     _ => {}
@@ -315,8 +366,7 @@ unsafe extern "system" fn wnd_proc(
                     }
                     ui::clear_input(state.hwnd_input);
                     ui::refresh_task_list(state);
-                    // Save to disk immediately upon Enter keystroke
-                    let _ = storage::save_tasks(&state.tasks, state.next_id);
+                    let _ = storage::save_tasks(&state.tasks, state.next_id, &state.config);
                     state.dirty = false;
                 } else if state.sub_task_input_mode {
                     state.sub_task_input_mode = false;
@@ -334,12 +384,7 @@ unsafe extern "system" fn wnd_proc(
                 if sel.0 >= 0 {
                     let idx = sel.0 as usize;
                     if let Some(item_ref) = state.current_list.get(idx).copied() {
-                        match item_ref {
-                            ListItemRef::Parent(id) => state.toggle_task(id),
-                            ListItemRef::SubTask { parent_id, sub_id } => {
-                                state.toggle_sub_task(parent_id, sub_id)
-                            }
-                        }
+                        state.toggle_item(item_ref.id);
                         ui::refresh_task_list(state);
                         schedule_save(hwnd);
                     }
@@ -355,14 +400,65 @@ unsafe extern "system" fn wnd_proc(
                 if sel.0 >= 0 {
                     let idx = sel.0 as usize;
                     if let Some(item_ref) = state.current_list.get(idx).copied() {
-                        match item_ref {
-                            ListItemRef::Parent(id) => state.delete_task(id),
-                            ListItemRef::SubTask { parent_id, sub_id } => {
-                                state.delete_sub_task(parent_id, sub_id)
-                            }
-                        }
+                        state.delete_item(item_ref.id);
                         ui::refresh_task_list(state);
                         schedule_save(hwnd);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+
+        // ── Custom message: Tab pressed in listbox (Indent sub-level) ──
+        ui::WM_LIST_INDENT => {
+            if let Some(state) = get_state(hwnd) {
+                let sel = SendMessageW(state.hwnd_list, LB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0)));
+                if sel.0 >= 0 {
+                    let idx = sel.0 as usize;
+                    if let Some(item_ref) = state.current_list.get(idx).copied() {
+                        if state.indent_item(item_ref.id) {
+                            ui::refresh_task_list(state);
+                            // Reselect the indented item
+                            if let Some(new_idx) =
+                                state.current_list.iter().position(|r| r.id == item_ref.id)
+                            {
+                                let _ = SendMessageW(
+                                    state.hwnd_list,
+                                    LB_SETCURSEL,
+                                    Some(WPARAM(new_idx)),
+                                    Some(LPARAM(0)),
+                                );
+                            }
+                            schedule_save(hwnd);
+                        }
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+
+        // ── Custom message: Shift+Tab pressed in listbox (Outdent sub-level) ──
+        ui::WM_LIST_OUTDENT => {
+            if let Some(state) = get_state(hwnd) {
+                let sel = SendMessageW(state.hwnd_list, LB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0)));
+                if sel.0 >= 0 {
+                    let idx = sel.0 as usize;
+                    if let Some(item_ref) = state.current_list.get(idx).copied() {
+                        if state.outdent_item(item_ref.id) {
+                            ui::refresh_task_list(state);
+                            // Reselect the outdented item
+                            if let Some(new_idx) =
+                                state.current_list.iter().position(|r| r.id == item_ref.id)
+                            {
+                                let _ = SendMessageW(
+                                    state.hwnd_list,
+                                    LB_SETCURSEL,
+                                    Some(WPARAM(new_idx)),
+                                    Some(LPARAM(0)),
+                                );
+                            }
+                            schedule_save(hwnd);
+                        }
                     }
                 }
             }
@@ -380,10 +476,11 @@ unsafe extern "system" fn wnd_proc(
                     if !text.is_empty() {
                         state.add_task(text);
                         ui::refresh_task_list(state);
-                        let _ = storage::save_tasks(&state.tasks, state.next_id);
+                        let _ = storage::save_tasks(&state.tasks, state.next_id, &state.config);
                         state.dirty = false;
                     }
                     let _ = InvalidateRect(Some(state.hwnd_voice_btn), None, true);
+                    let _ = InvalidateRect(Some(hwnd), None, true);
                 }
             }
             LRESULT(0)
@@ -395,6 +492,7 @@ unsafe extern "system" fn wnd_proc(
                 state.is_recording_voice = false;
                 let _ = KillTimer(Some(hwnd), VOICE_COUNTDOWN_TIMER_ID);
                 let _ = InvalidateRect(Some(state.hwnd_voice_btn), None, true);
+                let _ = InvalidateRect(Some(hwnd), None, true);
             }
             LRESULT(0)
         }
@@ -405,18 +503,18 @@ unsafe extern "system" fn wnd_proc(
                 state.is_recording_voice = false;
                 let _ = KillTimer(Some(hwnd), VOICE_COUNTDOWN_TIMER_ID);
                 let _ = InvalidateRect(Some(state.hwnd_voice_btn), None, true);
+                let _ = InvalidateRect(Some(hwnd), None, true);
                 voice::prompt_speech_permission(hwnd);
             }
             LRESULT(0)
         }
 
-        // ── Button clicks and list selection ──
+        // ── Button clicks, list selection, and commands ──
         WM_COMMAND => {
             let ctrl_id = (wparam.0 & 0xFFFF) as i32;
             let notify_code = ((wparam.0 >> 16) & 0xFFFF) as u16;
 
             match ctrl_id {
-                // ── Dialog Enter message (IDOK = 1) ──
                 1 => {
                     let focus = GetFocus();
                     if let Some(state) = get_state(hwnd) {
@@ -429,8 +527,8 @@ unsafe extern "system" fn wnd_proc(
                 // ── Header buttons ──
                 ui::IDC_BTN_PIN => {
                     if let Some(state) = get_state(hwnd) {
-                        state.is_topmost = !state.is_topmost;
-                        let pos = if state.is_topmost {
+                        state.config.is_topmost = !state.config.is_topmost;
+                        let pos = if state.config.is_topmost {
                             HWND_TOPMOST
                         } else {
                             HWND_NOTOPMOST
@@ -445,6 +543,18 @@ unsafe extern "system" fn wnd_proc(
                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                         );
                         let _ = InvalidateRect(Some(state.hwnd_pin_btn), None, true);
+                        schedule_save(hwnd);
+                    }
+                }
+
+                ui::IDC_BTN_SETTINGS => {
+                    if let Some(state) = get_state(hwnd) {
+                        state.view_mode = match state.view_mode {
+                            ViewMode::Tasks => ViewMode::Settings(SettingsSubPage::AppSettings),
+                            ViewMode::Settings(_) => ViewMode::Tasks,
+                        };
+                        ui::update_view_visibility(state);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
                     }
                 }
 
@@ -456,17 +566,15 @@ unsafe extern "system" fn wnd_proc(
                 ui::IDC_BTN_VOICE => {
                     if let Some(state) = get_state(hwnd) {
                         if state.is_recording_voice {
-                            // User clicked to cancel/stop early
                             voice::cancel_recording();
                             state.is_recording_voice = false;
                             let _ = KillTimer(Some(hwnd), VOICE_COUNTDOWN_TIMER_ID);
                             let _ = InvalidateRect(Some(state.hwnd_voice_btn), None, true);
                         } else {
-                            // Start 30-second recording session
                             state.is_recording_voice = true;
-                            state.voice_seconds_remaining = 30;
+                            state.voice_seconds_remaining = state.config.record_time_seconds;
                             let _ = SetTimer(Some(hwnd), VOICE_COUNTDOWN_TIMER_ID, 1000, None);
-                            voice::start_voice_recognition(hwnd);
+                            voice::start_voice_recognition(hwnd, state.config.record_time_seconds);
                             let _ = InvalidateRect(Some(state.hwnd_voice_btn), None, true);
                         }
                     }
@@ -476,12 +584,21 @@ unsafe extern "system" fn wnd_proc(
                 ui::IDC_BTN_ADD_SUB => {
                     if let Some(state) = get_state(hwnd) {
                         if let Some(parent_id) = state.selected_task_id {
-                            if let Some(task) = state.find_task(parent_id) {
-                                if !task.completed {
+                            if let Some((_, completed, _, depth, _)) =
+                                state.find_item_details(parent_id)
+                            {
+                                if !completed && depth < state.config.max_depth {
                                     state.sub_task_input_mode = true;
                                     ui::set_input_text(state.hwnd_input, "");
-                                    ui::set_cue_banner(state.hwnd_input, "Add sub-task... (Press Enter)");
-                                    let _ = InvalidateRect(Some(state.hwnd_add_sub_btn), None, true);
+                                    ui::set_cue_banner(
+                                        state.hwnd_input,
+                                        "Add sub-task... (Press Enter)",
+                                    );
+                                    let _ = InvalidateRect(
+                                        Some(state.hwnd_add_sub_btn),
+                                        None,
+                                        true,
+                                    );
                                 }
                             }
                         }
@@ -526,6 +643,126 @@ unsafe extern "system" fn wnd_proc(
                     }
                 }
 
+                // ── Settings Sub-page Navigation Tabs ──
+                ui::IDC_BTN_TAB_SETTINGS => {
+                    if let Some(state) = get_state(hwnd) {
+                        state.view_mode = ViewMode::Settings(SettingsSubPage::AppSettings);
+                        ui::update_view_visibility(state);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                    }
+                }
+                ui::IDC_BTN_TAB_INFO => {
+                    if let Some(state) = get_state(hwnd) {
+                        state.view_mode = ViewMode::Settings(SettingsSubPage::Info);
+                        ui::update_view_visibility(state);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                    }
+                }
+                ui::IDC_BTN_TAB_LOGS => {
+                    if let Some(state) = get_state(hwnd) {
+                        state.view_mode = ViewMode::Settings(SettingsSubPage::Logs);
+                        ui::update_view_visibility(state);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                    }
+                }
+                ui::IDC_BTN_BACK => {
+                    if let Some(state) = get_state(hwnd) {
+                        state.view_mode = ViewMode::Tasks;
+                        ui::update_view_visibility(state);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                    }
+                }
+
+                // ── App Settings: Record time options (7s, 15s, 30s) ──
+                ui::IDC_BTN_REC_7 => {
+                    if let Some(state) = get_state(hwnd) {
+                        state.config.record_time_seconds = 7;
+                        crate::state::log_event(
+                            crate::state::LogLevel::Info,
+                            "Record time updated to 7s (Default)",
+                        );
+                        schedule_save(hwnd);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                    }
+                }
+                ui::IDC_BTN_REC_15 => {
+                    if let Some(state) = get_state(hwnd) {
+                        state.config.record_time_seconds = 15;
+                        crate::state::log_event(
+                            crate::state::LogLevel::Info,
+                            "Record time updated to 15s",
+                        );
+                        schedule_save(hwnd);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                    }
+                }
+                ui::IDC_BTN_REC_30 => {
+                    if let Some(state) = get_state(hwnd) {
+                        state.config.record_time_seconds = 30;
+                        crate::state::log_event(
+                            crate::state::LogLevel::Info,
+                            "Record time updated to 30s",
+                        );
+                        schedule_save(hwnd);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                    }
+                }
+
+                // ── App Settings: Sub-level max depth options (1, 2, 3) ──
+                ui::IDC_BTN_DEPTH_1 => {
+                    if let Some(state) = get_state(hwnd) {
+                        state.config.max_depth = 1;
+                        crate::state::log_event(
+                            crate::state::LogLevel::Info,
+                            "Sub-level max depth set to 1",
+                        );
+                        ui::refresh_task_list(state);
+                        schedule_save(hwnd);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                    }
+                }
+                ui::IDC_BTN_DEPTH_2 => {
+                    if let Some(state) = get_state(hwnd) {
+                        state.config.max_depth = 2;
+                        crate::state::log_event(
+                            crate::state::LogLevel::Info,
+                            "Sub-level max depth set to 2",
+                        );
+                        ui::refresh_task_list(state);
+                        schedule_save(hwnd);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                    }
+                }
+                ui::IDC_BTN_DEPTH_3 => {
+                    if let Some(state) = get_state(hwnd) {
+                        state.config.max_depth = 3;
+                        crate::state::log_event(
+                            crate::state::LogLevel::Info,
+                            "Sub-level max depth set to 3 (Max)",
+                        );
+                        ui::refresh_task_list(state);
+                        schedule_save(hwnd);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                    }
+                }
+
+                // ── Logs View Actions: Test Mic & Clear Logs ──
+                ui::IDC_BTN_TEST_MIC => {
+                    if let Some(state) = get_state(hwnd) {
+                        if !state.is_recording_voice {
+                            state.is_recording_voice = true;
+                            state.voice_seconds_remaining = state.config.record_time_seconds;
+                            let _ = SetTimer(Some(hwnd), VOICE_COUNTDOWN_TIMER_ID, 1000, None);
+                            voice::start_voice_recognition(hwnd, state.config.record_time_seconds);
+                            let _ = InvalidateRect(Some(hwnd), None, true);
+                        }
+                    }
+                }
+                ui::IDC_BTN_CLEAR_LOGS => {
+                    crate::state::clear_logs();
+                    let _ = InvalidateRect(Some(hwnd), None, true);
+                }
+
                 // ── Listbox click: determine checkbox, delete, or selection ──
                 ui::IDC_TASKLIST if notify_code == LBN_SELCHANGE as u16 => {
                     if let Some(state) = get_state(hwnd) {
@@ -545,34 +782,30 @@ unsafe extern "system" fn wnd_proc(
                                 let mut list_rc = RECT::default();
                                 let _ = GetClientRect(state.hwnd_list, &mut list_rc);
 
-                                if pt.x > list_rc.right - 36 {
-                                    // Delete area (right 36px)
-                                    match item_ref {
-                                        ListItemRef::Parent(id) => state.delete_task(id),
-                                        ListItemRef::SubTask { parent_id, sub_id } => {
-                                            state.delete_sub_task(parent_id, sub_id)
-                                        }
-                                    }
-                                    ui::refresh_task_list(state);
-                                    schedule_save(hwnd);
-                                } else if pt.x < 34 || (matches!(item_ref, ListItemRef::SubTask { .. }) && pt.x < 56) {
-                                    // Checkbox area
-                                    match item_ref {
-                                        ListItemRef::Parent(id) => state.toggle_task(id),
-                                        ListItemRef::SubTask { parent_id, sub_id } => {
-                                            state.toggle_sub_task(parent_id, sub_id)
-                                        }
-                                    }
+                                if pt.x > list_rc.right - 34 {
+                                    // Delete area (right 34px)
+                                    state.delete_item(item_ref.id);
                                     ui::refresh_task_list(state);
                                     schedule_save(hwnd);
                                 } else {
-                                    // Selection for adding sub-todos
-                                    let parent_id = match item_ref {
-                                        ListItemRef::Parent(id) => id,
-                                        ListItemRef::SubTask { parent_id, .. } => parent_id,
-                                    };
-                                    state.selected_task_id = Some(parent_id);
-                                    let _ = InvalidateRect(Some(state.hwnd_add_sub_btn), None, true);
+                                    let indent_px = item_ref.depth as i32 * 18;
+                                    let check_start = 10 + indent_px;
+                                    let check_end = check_start + 20;
+
+                                    if pt.x >= check_start && pt.x <= check_end {
+                                        // Checkbox area
+                                        state.toggle_item(item_ref.id);
+                                        ui::refresh_task_list(state);
+                                        schedule_save(hwnd);
+                                    } else {
+                                        // Select item for nesting sub-tasks
+                                        state.selected_task_id = Some(item_ref.id);
+                                        let _ = InvalidateRect(
+                                            Some(state.hwnd_add_sub_btn),
+                                            None,
+                                            true,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -596,7 +829,7 @@ unsafe extern "system" fn wnd_proc(
                 let _ = KillTimer(Some(hwnd), SAVE_TIMER_ID);
                 if let Some(state) = get_state(hwnd) {
                     if state.dirty {
-                        let _ = storage::save_tasks(&state.tasks, state.next_id);
+                        let _ = storage::save_tasks(&state.tasks, state.next_id, &state.config);
                         state.dirty = false;
                     }
                 }
@@ -605,12 +838,16 @@ unsafe extern "system" fn wnd_proc(
                     if state.voice_seconds_remaining > 0 {
                         state.voice_seconds_remaining -= 1;
                         let _ = InvalidateRect(Some(state.hwnd_voice_btn), None, true);
+                        if matches!(state.view_mode, ViewMode::Settings(SettingsSubPage::Logs)) {
+                            let _ = InvalidateRect(Some(hwnd), None, true);
+                        }
                     }
                     if state.voice_seconds_remaining == 0 {
                         let _ = KillTimer(Some(hwnd), VOICE_COUNTDOWN_TIMER_ID);
                         state.is_recording_voice = false;
                         voice::cancel_recording();
                         let _ = InvalidateRect(Some(state.hwnd_voice_btn), None, true);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
                     }
                 }
             }
@@ -635,7 +872,7 @@ unsafe extern "system" fn wnd_proc(
             if !ptr.is_null() {
                 let state = &*ptr;
                 if state.dirty {
-                    let _ = storage::save_tasks(&state.tasks, state.next_id);
+                    let _ = storage::save_tasks(&state.tasks, state.next_id, &state.config);
                 }
                 let _ = Box::from_raw(ptr);
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -665,7 +902,6 @@ pub fn create_main_window(state: Box<AppState>) -> windows::core::Result<HWND> {
         let atom = RegisterClassExW(&wc);
         debug_assert!(atom != 0, "RegisterClassExW failed");
 
-        // Leak the Box to get a stable raw pointer
         let state_ptr = Box::into_raw(state);
 
         let hwnd = CreateWindowExW(
@@ -690,13 +926,12 @@ pub fn create_main_window(state: Box<AppState>) -> windows::core::Result<HWND> {
     }
 }
 
-/// Standard Win32 message loop with keyboard Tab navigation support via IsDialogMessageW.
+/// Standard Win32 message loop with keyboard Tab navigation support.
 pub fn run_message_loop(hwnd: HWND) {
     unsafe {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            // If Enter is pressed while focused on the EDIT control, dispatch directly
-            // so IsDialogMessageW doesn't suppress or eat it.
+            // Enter key dispatch for EDIT control
             if msg.message == WM_KEYDOWN && msg.wParam.0 == VK_RETURN.0 as usize {
                 if let Some(state) = get_state(hwnd) {
                     if GetFocus() == state.hwnd_input {
@@ -707,7 +942,22 @@ pub fn run_message_loop(hwnd: HWND) {
                 }
             }
 
-            // IsDialogMessageW translates Tab / Shift+Tab and Space/Enter navigation
+            // Tab / Shift+Tab interception for task list indentation
+            if msg.message == WM_KEYDOWN && msg.wParam.0 == VK_TAB.0 as usize {
+                if let Some(state) = get_state(hwnd) {
+                    if GetFocus() == state.hwnd_list {
+                        let is_shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+                        let target_msg = if is_shift {
+                            ui::WM_LIST_OUTDENT
+                        } else {
+                            ui::WM_LIST_INDENT
+                        };
+                        let _ = PostMessageW(Some(hwnd), target_msg, WPARAM(0), LPARAM(0));
+                        continue;
+                    }
+                }
+            }
+
             if !IsDialogMessageW(hwnd, &msg).as_bool() {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);

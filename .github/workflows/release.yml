@@ -1,0 +1,121 @@
+name: Release Floating TODO
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name to release (e.g. v0.2.3)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Windows Executable
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Determine Version Tag
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag_name }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
+      - name: Run Unit Tests
+        run: cargo test --target x86_64-pc-windows-msvc
+
+      - name: Build Release Binary
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Package & Prepare Asset
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.version.outputs.tag }}"
+          $srcExe = "target/x86_64-pc-windows-msvc/release/floating-todo.exe"
+          if (-not (Test-Path $srcExe)) {
+              $srcExe = "target/release/floating-todo.exe"
+          }
+          if (-not (Test-Path $srcExe)) {
+              Write-Error "Could not locate built floating-todo.exe"
+              exit 1
+          }
+
+          $distDir = "dist"
+          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+          
+          $destExe = "$distDir/floating-todo-$tag.exe"
+          Copy-Item $srcExe $destExe
+          
+          # Generate SHA-256 checksum
+          $hash = (Get-FileHash -Path $destExe -Algorithm SHA256).Hash.ToLower()
+          "$hash  floating-todo-$tag.exe" | Out-File -Encoding utf8 "$distDir/floating-todo-$tag.exe.sha256"
+          
+          Write-Host "Created release asset: $destExe"
+          Write-Host "SHA256: $hash"
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/
+          retention-days: 7
+
+  release:
+    name: Release & Publish Asset
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine Version Tag
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag_name }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist/
+
+      - name: Create GitHub Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Release ${{ steps.version.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/floating-todo-${{ steps.version.outputs.tag }}.exe
+            dist/floating-todo-${{ steps.version.outputs.tag }}.exe.sha256

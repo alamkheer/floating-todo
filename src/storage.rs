@@ -2,12 +2,14 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::state::Task;
+use crate::state::{AppConfig, Task};
 
-/// Serializable wrapper for the task list.
+/// Serializable wrapper for the task list and application configuration.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct TaskFile {
     next_id: u64,
+    #[serde(default)]
+    config: Option<AppConfig>,
     tasks: Vec<Task>,
 }
 
@@ -17,25 +19,30 @@ fn data_dir() -> PathBuf {
     PathBuf::from(appdata).join("FloatingTodo")
 }
 
-/// Load tasks from a specific directory path. Returns empty vec on any error.
-pub fn load_tasks_from(dir: &std::path::Path) -> (Vec<Task>, u64) {
+/// Load tasks and config from a specific directory path. Returns default on error.
+pub fn load_tasks_from(dir: &std::path::Path) -> (Vec<Task>, u64, AppConfig) {
     let path = dir.join("tasks.json");
     match fs::read_to_string(&path) {
         Ok(contents) => match serde_json::from_str::<TaskFile>(&contents) {
-            Ok(tf) => (tf.tasks, tf.next_id),
-            Err(_) => (Vec::new(), 1),
+            Ok(tf) => (tf.tasks, tf.next_id, tf.config.unwrap_or_default()),
+            Err(_) => (Vec::new(), 1, AppConfig::default()),
         },
-        Err(_) => (Vec::new(), 1),
+        Err(_) => (Vec::new(), 1, AppConfig::default()),
     }
 }
 
-/// Load tasks from disk (%APPDATA%\FloatingTodo). Returns empty vec on any error.
-pub fn load_tasks() -> (Vec<Task>, u64) {
+/// Load tasks and config from disk (%APPDATA%\FloatingTodo). Returns defaults on any error.
+pub fn load_tasks() -> (Vec<Task>, u64, AppConfig) {
     load_tasks_from(&data_dir())
 }
 
 /// Atomic write to a specific directory path: write to `.tmp`, then rename over target.
-pub fn save_tasks_to(dir: &std::path::Path, tasks: &[Task], next_id: u64) -> std::io::Result<()> {
+pub fn save_tasks_to(
+    dir: &std::path::Path,
+    tasks: &[Task],
+    next_id: u64,
+    config: &AppConfig,
+) -> std::io::Result<()> {
     fs::create_dir_all(dir)?;
 
     let path = dir.join("tasks.json");
@@ -43,6 +50,7 @@ pub fn save_tasks_to(dir: &std::path::Path, tasks: &[Task], next_id: u64) -> std
 
     let tf = TaskFile {
         next_id,
+        config: Some(config.clone()),
         tasks: tasks.to_vec(),
     };
     let json = serde_json::to_string_pretty(&tf)?;
@@ -59,8 +67,8 @@ pub fn save_tasks_to(dir: &std::path::Path, tasks: &[Task], next_id: u64) -> std
 
 /// Atomic write: write to `.tmp`, then rename over the target (%APPDATA%\FloatingTodo).
 /// This prevents data corruption if the process is killed mid-write.
-pub fn save_tasks(tasks: &[Task], next_id: u64) -> std::io::Result<()> {
-    save_tasks_to(&data_dir(), tasks, next_id)
+pub fn save_tasks(tasks: &[Task], next_id: u64, config: &AppConfig) -> std::io::Result<()> {
+    save_tasks_to(&data_dir(), tasks, next_id, config)
 }
 
 #[cfg(test)]
@@ -82,26 +90,34 @@ mod tests {
                 id: 1,
                 text: "Task A".to_string(),
                 completed: false,
+                created_at: "2026-11-16 18:00:00.000".to_string(),
                 sub_tasks: Vec::new(),
             },
             Task {
                 id: 2,
                 text: "Task B".to_string(),
                 completed: true,
+                created_at: "2026-11-16 18:01:00.000".to_string(),
                 sub_tasks: Vec::new(),
             },
         ];
+        let mut config = AppConfig::default();
+        config.record_time_seconds = 30;
+        config.max_depth = 2;
 
-        let save_res = save_tasks_to(&dir, &tasks, 3);
+        let save_res = save_tasks_to(&dir, &tasks, 3, &config);
         assert!(save_res.is_ok());
 
-        let (loaded, next_id) = load_tasks_from(&dir);
+        let (loaded, next_id, loaded_config) = load_tasks_from(&dir);
         assert_eq!(next_id, 3);
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].text, "Task A");
+        assert_eq!(loaded[0].created_at, "2026-11-16 18:00:00.000");
         assert!(!loaded[0].completed);
         assert_eq!(loaded[1].text, "Task B");
         assert!(loaded[1].completed);
+        assert_eq!(loaded_config.record_time_seconds, 30);
+        assert_eq!(loaded_config.max_depth, 2);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -113,9 +129,11 @@ mod tests {
         let path = dir.join("tasks.json");
         fs::write(&path, "{ corrupt json ...").unwrap();
 
-        let (loaded, next_id) = load_tasks_from(&dir);
+        let (loaded, next_id, config) = load_tasks_from(&dir);
         assert_eq!(loaded.len(), 0);
         assert_eq!(next_id, 1);
+        assert_eq!(config.record_time_seconds, 7);
+        assert_eq!(config.max_depth, 3);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -123,9 +141,11 @@ mod tests {
     #[test]
     fn test_missing_file_fallback() {
         let dir = test_temp_dir("missing");
-        let (loaded, next_id) = load_tasks_from(&dir);
+        let (loaded, next_id, config) = load_tasks_from(&dir);
         assert_eq!(loaded.len(), 0);
         assert_eq!(next_id, 1);
+        assert_eq!(config.record_time_seconds, 7);
+        assert_eq!(config.max_depth, 3);
     }
 
     #[test]
@@ -133,7 +153,6 @@ mod tests {
         let dir = test_temp_dir("legacy_v1");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("tasks.json");
-        // Legacy v1 JSON had no sub_tasks field
         let v1_json = r#"{
   "next_id": 3,
   "tasks": [
@@ -151,13 +170,15 @@ mod tests {
 }"#;
         fs::write(&path, v1_json).unwrap();
 
-        let (loaded, next_id) = load_tasks_from(&dir);
+        let (loaded, next_id, config) = load_tasks_from(&dir);
         assert_eq!(next_id, 3);
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].text, "Legacy task 1");
         assert!(loaded[0].sub_tasks.is_empty());
+        assert!(!loaded[0].created_at.is_empty());
         assert_eq!(loaded[1].text, "Legacy task 2");
         assert!(loaded[1].sub_tasks.is_empty());
+        assert_eq!(config.record_time_seconds, 7);
 
         let _ = fs::remove_dir_all(&dir);
     }
