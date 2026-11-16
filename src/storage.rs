@@ -82,11 +82,13 @@ mod tests {
                 id: 1,
                 text: "Task A".to_string(),
                 completed: false,
+                sub_tasks: Vec::new(),
             },
             Task {
                 id: 2,
                 text: "Task B".to_string(),
                 completed: true,
+                sub_tasks: Vec::new(),
             },
         ];
 
@@ -124,5 +126,39 @@ mod tests {
         let (loaded, next_id) = load_tasks_from(&dir);
         assert_eq!(loaded.len(), 0);
         assert_eq!(next_id, 1);
+    }
+
+    #[test]
+    fn test_legacy_v1_json_compatibility() {
+        let dir = test_temp_dir("legacy_v1");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tasks.json");
+        // Legacy v1 JSON had no sub_tasks field
+        let v1_json = r#"{
+  "next_id": 3,
+  "tasks": [
+    {
+      "id": 1,
+      "text": "Legacy task 1",
+      "completed": false
+    },
+    {
+      "id": 2,
+      "text": "Legacy task 2",
+      "completed": true
+    }
+  ]
+}"#;
+        fs::write(&path, v1_json).unwrap();
+
+        let (loaded, next_id) = load_tasks_from(&dir);
+        assert_eq!(next_id, 3);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].text, "Legacy task 1");
+        assert!(loaded[0].sub_tasks.is_empty());
+        assert_eq!(loaded[1].text, "Legacy task 2");
+        assert!(loaded[1].sub_tasks.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

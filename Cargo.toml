@@ -1,6 +1,6 @@
 [package]
 name = "floating-todo"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Ultra-lightweight floating TODO window for Windows"
 
@@ -26,6 +26,12 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     # Console attach for CLI --version
     "Win32_System_Console",
+    # COM runtime for WinRT calls
+    "Win32_System_Com",
+    # WinRT Speech Recognition and Foundation async
+    "Foundation",
+    "Foundation_Collections",
+    "Media_SpeechRecognition",
 ]}
 
 # JSON persistence (minimal features to reduce binary size)

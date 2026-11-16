@@ -3,13 +3,16 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::*;
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::hotkey;
-use crate::state::AppState;
+use crate::state::{AppState, ListItemRef};
 use crate::storage;
 use crate::tray;
 use crate::ui;
+use crate::voice;
 
 /// Window class name.
 const CLASS_NAME: PCWSTR = w!("FloatingTodoClass");
@@ -18,9 +21,14 @@ const CLASS_NAME: PCWSTR = w!("FloatingTodoClass");
 pub const WIN_WIDTH: i32 = 320;
 pub const WIN_HEIGHT: i32 = 480;
 
-/// Timer ID for debounced persistence.
+/// Timer IDs.
 const SAVE_TIMER_ID: usize = 1;
 const SAVE_DEBOUNCE_MS: u32 = 2000;
+const VOICE_COUNTDOWN_TIMER_ID: usize = 2;
+
+/// Custom message IDs for keyboard listbox actions.
+pub const WM_LIST_TOGGLE: u32 = WM_APP + 104;
+pub const WM_LIST_DELETE: u32 = WM_APP + 105;
 
 /// Retrieve a mutable reference to AppState from GWLP_USERDATA.
 ///
@@ -40,6 +48,29 @@ fn schedule_save(hwnd: HWND) {
     unsafe {
         let _ = SetTimer(Some(hwnd), SAVE_TIMER_ID, SAVE_DEBOUNCE_MS, None);
     }
+}
+
+/// Subclass proc for the LISTBOX control to support keyboard shortcuts (Space to toggle, Delete to delete).
+unsafe extern "system" fn list_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _uid: usize,
+    _data: usize,
+) -> LRESULT {
+    if msg == WM_KEYDOWN {
+        if let Ok(parent) = GetParent(hwnd) {
+            if wparam.0 == VK_SPACE.0 as usize {
+                let _ = PostMessageW(Some(parent), WM_LIST_TOGGLE, WPARAM(0), LPARAM(0));
+                return LRESULT(0);
+            } else if wparam.0 == VK_DELETE.0 as usize {
+                let _ = PostMessageW(Some(parent), WM_LIST_DELETE, WPARAM(0), LPARAM(0));
+                return LRESULT(0);
+            }
+        }
+    }
+    DefSubclassProc(hwnd, msg, wparam, lparam)
 }
 
 /// The main window procedure.
@@ -74,12 +105,25 @@ unsafe extern "system" fn wnd_proc(
                 // Create fonts and apply to controls
                 let font_normal = Box::leak(Box::new(ui::Font::new(16, false)));
                 let font_small = Box::leak(Box::new(ui::Font::new(13, false)));
+                let font_emoji = Box::leak(Box::new(ui::Font::emoji_font(15)));
 
                 ui::set_font(state.hwnd_input, font_normal);
+                ui::set_font(state.hwnd_voice_btn, font_emoji);
                 ui::set_font(state.hwnd_list, font_normal);
                 ui::set_font(state.hwnd_filter_all, font_small);
                 ui::set_font(state.hwnd_filter_active, font_small);
                 ui::set_font(state.hwnd_filter_done, font_small);
+                ui::set_font(state.hwnd_add_sub_btn, font_small);
+                ui::set_font(state.hwnd_pin_btn, font_emoji);
+                ui::set_font(state.hwnd_close_btn, font_normal);
+
+                // Subclass listbox for Space (toggle) and Delete (remove)
+                let _ = SetWindowSubclass(
+                    state.hwnd_list,
+                    Some(list_subclass_proc),
+                    2,
+                    0,
+                );
 
                 // Populate the list from loaded tasks
                 ui::refresh_task_list(state);
@@ -122,7 +166,6 @@ unsafe extern "system" fn wnd_proc(
             SetBkMode(hdc, TRANSPARENT);
             SetTextColor(hdc, COLORREF(ui::CLR_TEXT));
 
-            // Create a temporary font for header title
             let title_font = ui::Font::new(15, true);
             let old_font = SelectObject(hdc, title_font.handle().into());
 
@@ -198,6 +241,8 @@ unsafe extern "system" fn wnd_proc(
                     }
                     ui::IDC_BTN_PIN
                     | ui::IDC_BTN_CLOSE
+                    | ui::IDC_BTN_VOICE
+                    | ui::IDC_BTN_ADD_SUB
                     | ui::IDC_BTN_FILTER_ALL
                     | ui::IDC_BTN_FILTER_ACTIVE
                     | ui::IDC_BTN_FILTER_DONE => {
@@ -214,11 +259,91 @@ unsafe extern "system" fn wnd_proc(
             if let Some(state) = get_state(hwnd) {
                 let text = ui::get_input_text(state.hwnd_input);
                 if !text.is_empty() {
-                    state.add_task(text);
+                    if state.sub_task_input_mode {
+                        if let Some(parent_id) = state.selected_task_id {
+                            state.add_sub_task(parent_id, text);
+                        }
+                        state.sub_task_input_mode = false;
+                    } else {
+                        state.add_task(text);
+                    }
                     ui::clear_input(state.hwnd_input);
                     ui::refresh_task_list(state);
                     schedule_save(hwnd);
+                } else if state.sub_task_input_mode {
+                    state.sub_task_input_mode = false;
                 }
+            }
+            LRESULT(0)
+        }
+
+        // ── Custom message: Space pressed in listbox (Toggle item) ──
+        WM_LIST_TOGGLE => {
+            if let Some(state) = get_state(hwnd) {
+                let sel = SendMessageW(state.hwnd_list, LB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0)));
+                if sel.0 >= 0 {
+                    let idx = sel.0 as usize;
+                    if let Some(item_ref) = state.current_list.get(idx).copied() {
+                        match item_ref {
+                            ListItemRef::Parent(id) => state.toggle_task(id),
+                            ListItemRef::SubTask { parent_id, sub_id } => {
+                                state.toggle_sub_task(parent_id, sub_id)
+                            }
+                        }
+                        ui::refresh_task_list(state);
+                        schedule_save(hwnd);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+
+        // ── Custom message: Delete pressed in listbox (Remove item) ──
+        WM_LIST_DELETE => {
+            if let Some(state) = get_state(hwnd) {
+                let sel = SendMessageW(state.hwnd_list, LB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0)));
+                if sel.0 >= 0 {
+                    let idx = sel.0 as usize;
+                    if let Some(item_ref) = state.current_list.get(idx).copied() {
+                        match item_ref {
+                            ListItemRef::Parent(id) => state.delete_task(id),
+                            ListItemRef::SubTask { parent_id, sub_id } => {
+                                state.delete_sub_task(parent_id, sub_id)
+                            }
+                        }
+                        ui::refresh_task_list(state);
+                        schedule_save(hwnd);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+
+        // ── Custom message: Voice speech recognized ──
+        voice::WM_VOICE_RESULT => {
+            let ptr = wparam.0 as *mut String;
+            if !ptr.is_null() {
+                let text = *Box::from_raw(ptr);
+                if let Some(state) = get_state(hwnd) {
+                    state.is_recording_voice = false;
+                    let _ = KillTimer(Some(hwnd), VOICE_COUNTDOWN_TIMER_ID);
+                    if !text.is_empty() {
+                        state.add_task(text);
+                        ui::refresh_task_list(state);
+                        schedule_save(hwnd);
+                    }
+                    let _ = InvalidateRect(Some(state.hwnd_voice_btn), None, true);
+                }
+            }
+            LRESULT(0)
+        }
+
+        // ── Custom message: Voice session ended or timed out ──
+        voice::WM_VOICE_STOPPED => {
+            if let Some(state) = get_state(hwnd) {
+                state.is_recording_voice = false;
+                let _ = KillTimer(Some(hwnd), VOICE_COUNTDOWN_TIMER_ID);
+                let _ = InvalidateRect(Some(state.hwnd_voice_btn), None, true);
             }
             LRESULT(0)
         }
@@ -255,36 +380,80 @@ unsafe extern "system" fn wnd_proc(
                     let _ = ShowWindow(hwnd, SW_HIDE);
                 }
 
+                // ── Voice Input Button 🎙️ ──
+                ui::IDC_BTN_VOICE => {
+                    if let Some(state) = get_state(hwnd) {
+                        if state.is_recording_voice {
+                            // User clicked to cancel/stop early
+                            voice::cancel_recording();
+                            state.is_recording_voice = false;
+                            let _ = KillTimer(Some(hwnd), VOICE_COUNTDOWN_TIMER_ID);
+                            let _ = InvalidateRect(Some(state.hwnd_voice_btn), None, true);
+                        } else {
+                            // Start 30-second recording session
+                            state.is_recording_voice = true;
+                            state.voice_seconds_remaining = 30;
+                            let _ = SetTimer(Some(hwnd), VOICE_COUNTDOWN_TIMER_ID, 1000, None);
+                            voice::start_voice_recognition(hwnd);
+                            let _ = InvalidateRect(Some(state.hwnd_voice_btn), None, true);
+                        }
+                    }
+                }
+
+                // ── Add Sub-task Button ＋ Sub ──
+                ui::IDC_BTN_ADD_SUB => {
+                    if let Some(state) = get_state(hwnd) {
+                        if let Some(parent_id) = state.selected_task_id {
+                            if let Some(task) = state.find_task(parent_id) {
+                                if !task.completed {
+                                    state.sub_task_input_mode = true;
+                                    ui::set_input_text(state.hwnd_input, "");
+                                    let _ = InvalidateRect(Some(state.hwnd_add_sub_btn), None, true);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // ── Filter buttons ──
                 ui::IDC_BTN_FILTER_ALL => {
                     if let Some(state) = get_state(hwnd) {
                         state.filter = crate::state::Filter::All;
+                        state.selected_task_id = None;
+                        state.sub_task_input_mode = false;
                         ui::refresh_task_list(state);
                         let _ = InvalidateRect(Some(state.hwnd_filter_all), None, true);
                         let _ = InvalidateRect(Some(state.hwnd_filter_active), None, true);
                         let _ = InvalidateRect(Some(state.hwnd_filter_done), None, true);
+                        let _ = InvalidateRect(Some(state.hwnd_add_sub_btn), None, true);
                     }
                 }
                 ui::IDC_BTN_FILTER_ACTIVE => {
                     if let Some(state) = get_state(hwnd) {
                         state.filter = crate::state::Filter::Active;
+                        state.selected_task_id = None;
+                        state.sub_task_input_mode = false;
                         ui::refresh_task_list(state);
                         let _ = InvalidateRect(Some(state.hwnd_filter_all), None, true);
                         let _ = InvalidateRect(Some(state.hwnd_filter_active), None, true);
                         let _ = InvalidateRect(Some(state.hwnd_filter_done), None, true);
+                        let _ = InvalidateRect(Some(state.hwnd_add_sub_btn), None, true);
                     }
                 }
                 ui::IDC_BTN_FILTER_DONE => {
                     if let Some(state) = get_state(hwnd) {
                         state.filter = crate::state::Filter::Completed;
+                        state.selected_task_id = None;
+                        state.sub_task_input_mode = false;
                         ui::refresh_task_list(state);
                         let _ = InvalidateRect(Some(state.hwnd_filter_all), None, true);
                         let _ = InvalidateRect(Some(state.hwnd_filter_active), None, true);
                         let _ = InvalidateRect(Some(state.hwnd_filter_done), None, true);
+                        let _ = InvalidateRect(Some(state.hwnd_add_sub_btn), None, true);
                     }
                 }
 
-                // ── Listbox click: determine checkbox or delete ──
+                // ── Listbox click: determine checkbox, delete, or selection ──
                 ui::IDC_TASKLIST if notify_code == LBN_SELCHANGE as u16 => {
                     if let Some(state) = get_state(hwnd) {
                         let sel = SendMessageW(
@@ -294,40 +463,45 @@ unsafe extern "system" fn wnd_proc(
                             Some(LPARAM(0)),
                         );
                         if sel.0 >= 0 {
-                            let item_data = SendMessageW(
-                                state.hwnd_list,
-                                LB_GETITEMDATA,
-                                Some(WPARAM(sel.0 as usize)),
-                                Some(LPARAM(0)),
-                            );
-                            let task_id = item_data.0 as u64;
+                            let idx = sel.0 as usize;
+                            if let Some(item_ref) = state.current_list.get(idx).copied() {
+                                let mut pt = POINT::default();
+                                let _ = GetCursorPos(&mut pt);
+                                let _ = ScreenToClient(state.hwnd_list, &mut pt);
 
-                            // Get cursor position relative to the list
-                            let mut pt = POINT::default();
-                            let _ = GetCursorPos(&mut pt);
-                            let _ = ScreenToClient(state.hwnd_list, &mut pt);
+                                let mut list_rc = RECT::default();
+                                let _ = GetClientRect(state.hwnd_list, &mut list_rc);
 
-                            let mut list_rc = RECT::default();
-                            let _ = GetClientRect(state.hwnd_list, &mut list_rc);
-
-                            if pt.x > list_rc.right - 36 {
-                                // Delete area (right 36px)
-                                state.delete_task(task_id);
-                            } else {
-                                // Toggle area (anywhere else)
-                                state.toggle_task(task_id);
+                                if pt.x > list_rc.right - 36 {
+                                    // Delete area (right 36px)
+                                    match item_ref {
+                                        ListItemRef::Parent(id) => state.delete_task(id),
+                                        ListItemRef::SubTask { parent_id, sub_id } => {
+                                            state.delete_sub_task(parent_id, sub_id)
+                                        }
+                                    }
+                                    ui::refresh_task_list(state);
+                                    schedule_save(hwnd);
+                                } else if pt.x < 34 || (matches!(item_ref, ListItemRef::SubTask { .. }) && pt.x < 56) {
+                                    // Checkbox area
+                                    match item_ref {
+                                        ListItemRef::Parent(id) => state.toggle_task(id),
+                                        ListItemRef::SubTask { parent_id, sub_id } => {
+                                            state.toggle_sub_task(parent_id, sub_id)
+                                        }
+                                    }
+                                    ui::refresh_task_list(state);
+                                    schedule_save(hwnd);
+                                } else {
+                                    // Selection for adding sub-todos
+                                    let parent_id = match item_ref {
+                                        ListItemRef::Parent(id) => id,
+                                        ListItemRef::SubTask { parent_id, .. } => parent_id,
+                                    };
+                                    state.selected_task_id = Some(parent_id);
+                                    let _ = InvalidateRect(Some(state.hwnd_add_sub_btn), None, true);
+                                }
                             }
-
-                            ui::refresh_task_list(state);
-                            schedule_save(hwnd);
-
-                            // Deselect
-                            let _ = SendMessageW(
-                                state.hwnd_list,
-                                LB_SETCURSEL,
-                                Some(WPARAM(usize::MAX)),
-                                Some(LPARAM(0)),
-                            );
                         }
                     }
                 }
@@ -343,7 +517,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
-        // ── Debounced save timer ──
+        // ── Timers: Save debounce & Voice countdown ──
         WM_TIMER => {
             if wparam.0 == SAVE_TIMER_ID {
                 let _ = KillTimer(Some(hwnd), SAVE_TIMER_ID);
@@ -351,6 +525,19 @@ unsafe extern "system" fn wnd_proc(
                     if state.dirty {
                         let _ = storage::save_tasks(&state.tasks, state.next_id);
                         state.dirty = false;
+                    }
+                }
+            } else if wparam.0 == VOICE_COUNTDOWN_TIMER_ID {
+                if let Some(state) = get_state(hwnd) {
+                    if state.voice_seconds_remaining > 0 {
+                        state.voice_seconds_remaining -= 1;
+                        let _ = InvalidateRect(Some(state.hwnd_voice_btn), None, true);
+                    }
+                    if state.voice_seconds_remaining == 0 {
+                        let _ = KillTimer(Some(hwnd), VOICE_COUNTDOWN_TIMER_ID);
+                        state.is_recording_voice = false;
+                        voice::cancel_recording();
+                        let _ = InvalidateRect(Some(state.hwnd_voice_btn), None, true);
                     }
                 }
             }
@@ -430,13 +617,16 @@ pub fn create_main_window(state: Box<AppState>) -> windows::core::Result<HWND> {
     }
 }
 
-/// Standard Win32 message loop — pure event-driven, zero polling.
-pub fn run_message_loop() {
+/// Standard Win32 message loop with keyboard Tab navigation support via IsDialogMessageW.
+pub fn run_message_loop(hwnd: HWND) {
     unsafe {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            // IsDialogMessageW translates Tab / Shift+Tab and Space/Enter navigation
+            if !IsDialogMessageW(hwnd, &msg).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
     }
 }

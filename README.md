@@ -2,10 +2,10 @@
 
 > **Ultra-lightweight, zero-bloat floating desktop TODO widget built with native Win32 API and Rust.**
 
-Floating TODO is a high-performance Windows desktop companion designed for developers and power users who want an unobtrusive, always-accessible task list. Engineered in Rust using raw Win32 bindings (`windows-rs`), it runs without web runtimes, browser frameworks, or heavy abstraction layers.
+Floating TODO is a high-performance Windows desktop companion designed for developers and power users who want an unobtrusive, always-accessible task list. Engineered in Rust using raw Win32 bindings and WinRT speech APIs (`windows-rs`), it runs without web runtimes, browser frameworks, or heavy abstraction layers.
 
-- **Executable Size:** ~180 KB standalone binary (fully self-contained, no DLL dependencies).
-- **Memory Footprint:** Less than 10 MB RAM at runtime.
+- **Executable Size:** ~390 KB standalone binary (fully self-contained, no external DLL dependencies).
+- **Memory Footprint:** Less than 12 MB RAM at runtime.
 - **Framework Overhead:** 0% — No Electron, no WebView2, no Chromium.
 
 ---
@@ -33,6 +33,11 @@ Floating TODO is a high-performance Windows desktop companion designed for devel
 ## Features
 
 - **Blazing Fast & Ultra-Lightweight:** Compiled with size-optimizing link-time optimization (`opt-level = "z"`, LTO, stripped binary), launching instantly.
+- **Voice Dictation Input (WinRT Speech Recognition):** One-click 30-second voice dictation powered by `Windows.Media.SpeechRecognition` with speech topic dictation constraints. Features real-time countdown timer and automatically adds recognized speech as a new task entry.
+- **Hierarchical Sub-Tasks & Cascading Completion:** Select any active task and click `＋ Sub` to attach sub-tasks. Indented with clean `└─` visual tree indicators. Automatically marks the parent task completed when all sub-tasks are done, and re-opens the parent if any sub-task is unchecked.
+- **Quick-Delete for Done Tasks:** Completed tasks feature a small `🗑` emoji delete button for immediate, clutter-free task cleanup.
+- **Modern Emoji Header Controls & Balloon Tooltips:** Native `📌` Always-on-Top toggle, `🎙️` Voice Dictation trigger, and rich balloon popovers (`tooltips_class32`) explaining each control.
+- **Full Keyboard Accessibility:** Seamless `Tab` and `Shift + Tab` navigation through all buttons, inputs, and list items with native focus rectangles (`ODS_FOCUS`). Use `Space` to toggle completion and `Delete` to remove items directly in the list.
 - **Native Dark Theme:** Owner-drawn controls using Win32 GDI with Desktop Window Manager (DWM) immersive dark titlebar integration (`DwmSetWindowAttribute`).
 - **Per-Monitor V2 High-DPI Aware:** Configured prior to window initialization (`SetProcessDpiAwarenessContext`), ensuring crisp text and correct layouts on multi-monitor setups with mixed scaling (100%, 125%, 150%, 200%).
 - **Global Hotkey:** Press `Ctrl + Shift + T` from anywhere in Windows to immediately toggle or focus the floating window.
@@ -40,7 +45,7 @@ Floating TODO is a high-performance Windows desktop companion designed for devel
 - **Frameless Draggable Window:** Clean borderless design; simply drag anywhere along the top header bar to reposition.
 - **System Tray Companion:** Closing the window minimizes it directly to the Windows system tray. The tray context menu offers instant visibility toggle, pin status toggle, version inspection, and clean exit.
 - **Smart Filtering:** Switch effortlessly between **All**, **Active**, and **Done** task views.
-- **Crash-Resilient Atomic Persistence:** Tasks are stored in `%APPDATA%\FloatingTodo\tasks.json` using atomic temporary file swaps (`.tmp` write followed by atomic rename) to eliminate state corruption on unexpected shutdowns.
+- **Crash-Resilient Atomic Persistence:** Tasks are stored in `%APPDATA%\FloatingTodo\tasks.json` using atomic temporary file swaps (`.tmp` write followed by atomic rename) with complete backward compatibility for legacy v1 format.
 
 ---
 
@@ -49,11 +54,17 @@ Floating TODO is a high-performance Windows desktop companion designed for devel
 | Shortcut / Action | Scope | Description |
 |---|---|---|
 | `Ctrl + Shift + T` | Global (System-wide) | Toggle floating window visibility (Show / Hide / Focus). |
-| `Enter` | Input Box | Adds a new task to the list. |
+| `Tab` / `Shift + Tab` | Window | Cycle keyboard focus forward and backward across all controls. |
+| `Enter` | Input Box | Adds a new parent task (or adds a sub-task if sub-task input mode is active). |
+| `Esc` | Input Box | Cancels sub-task input mode and returns to normal parent task entry. |
+| `Space` | List View | Toggles selected task or sub-task between active and completed. |
+| `Delete` | List View | Permanently deletes the selected task or sub-task. |
 | Left Click on `[✓]` | Task Item | Toggles task between active and completed. |
-| Left Click on `[X]` | Task Item | Permanently deletes the task. |
+| Left Click on `🗑` | Completed Task Item | Permanently deletes the completed entry. |
+| Click `＋ Sub` Button | Control Bar | Adds a sub-task to the currently selected active task. |
+| Click `🎙️` Button | Header Bar | Starts 30-second voice dictation (click again to cancel). |
 | Click Filter Buttons | Header Bar | Filters view: `All`, `Active`, `Done`. |
-| Click `📌` Pin Button | Header Bar | Toggles Always-on-Top mode. |
+| Click `📌` Pin Button | Header Bar | Toggles Always-on-Top mode (with hover balloon tooltip). |
 | Click `✕` Close Button | Header Bar | Minimizes widget to the System Tray. |
 | Right Click Tray Icon | System Tray | Opens context menu (Version, Show/Hide, Always-on-Top, Exit). |
 | Left Click Tray Icon | System Tray | Toggles window visibility. |
@@ -68,10 +79,11 @@ windows-todo-app/
 ├── assets/                     # Application assets and icon resources
 ├── src/
 │   ├── main.rs                 # Entry point, CLI argument parser (--version), DPI awareness
-│   ├── window.rs               # Window class registration, WndProc, drag handling, timers
-│   ├── ui.rs                   # Win32 GDI owner-draw painting, dark palette, fonts, controls
-│   ├── state.rs                # Central AppState, Task structs, filter modes, brush cache
+│   ├── window.rs               # Window class registration, WndProc, drag handling, timers, Tab nav
+│   ├── ui.rs                   # Win32 GDI owner-draw painting, dark palette, fonts, tooltips, controls
+│   ├── state.rs                # Central AppState, Task/SubTask structs, filter modes, cascade logic
 │   ├── storage.rs              # Atomic JSON persistence (%APPDATA%\FloatingTodo\tasks.json)
+│   ├── voice.rs                # WinRT SpeechRecognizer dictation constraints & async worker
 │   ├── tray.rs                 # System tray icon (Shell_NotifyIconW) & context menu
 │   └── hotkey.rs               # Global keyboard hotkey hook (Ctrl + Shift + T)
 ├── build.rs                    # Auto-generates Windows PE VERSIONINFO resource from Cargo.toml

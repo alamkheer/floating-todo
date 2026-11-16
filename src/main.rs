@@ -5,6 +5,7 @@ mod state;
 mod storage;
 mod tray;
 mod ui;
+mod voice;
 mod window;
 
 use windows::Win32::UI::HiDpi::{
@@ -61,7 +62,7 @@ fn main() -> windows::core::Result<()> {
     let _tray = tray::TrayIcon::new(hwnd)?;
 
     // 6. Enter the message loop (blocks until WM_QUIT)
-    window::run_message_loop();
+    window::run_message_loop(hwnd);
 
     // _tray and _hotkey Drop here → cleanup is automatic
     Ok(())
